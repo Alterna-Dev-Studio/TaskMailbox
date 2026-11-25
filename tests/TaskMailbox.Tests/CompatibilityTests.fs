@@ -239,21 +239,21 @@ module CompatibilityTests =
 
 
     /// controlMailbox/test.fsx `mailboxes ()`: `getSimpleMailbox` without the delay.
+    /// Loops with `while`: unlike Async, `return!` in a task is not a tail call, so recursing
+    /// through synchronously completed Receives overflows the stack.
     let getCounter (mailboxes: IMailboxes) =
         Mailboxes.create
             mailboxes
             (fun inbox ->
-                let rec loop n =
-                    cancellableTask {
-                        match! inbox.Receive() with
-                        | Increment m -> return! loop (n + m)
-                        | Reset -> return! loop 0
-                        | Fetch reply ->
-                            reply.SetResult n
-                            return! loop n
-                    }
+                cancellableTask {
+                    let mutable n = 0
 
-                loop 0
+                    while true do
+                        match! inbox.Receive() with
+                        | Increment m -> n <- n + m
+                        | Reset -> n <- 0
+                        | Fetch reply -> reply.SetResult n
+                }
             )
 
     /// controlMailbox/test.fsx `test6`: posts `Increment n` down to 0 and computes the same sum.
