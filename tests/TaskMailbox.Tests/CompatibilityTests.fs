@@ -6,7 +6,7 @@ open System.Threading.Tasks
 open Expecto
 open IcedTasks
 
-/// Scenarios from dotnet/fsharp MailboxProcessorType.fs, run against FSharp.Core and TaskMailbox alike.
+/// Scenarios from dotnet/fsharp MailboxProcessorType.fs and controlMailbox/test.fsx, run against FSharp.Core and TaskMailbox alike.
 module CompatibilityTests =
     open TestHelpers
 
@@ -93,14 +93,12 @@ module CompatibilityTests =
                     cts.Token
                 )
 
-            let error = firstFrom mb.Error
             mb.Start()
             mb.Post 1
             do! Expect.completesWithin waitTime received.Task "Should receive"
             cts.Cancel()
             do! Expect.completesWithin waitTime disposed.Task "Should dispose"
             Expect.equal (result ()) (Some "Received 1 Disposed") "Should receive then dispose"
-            do! Expect.staysIncomplete 100 error "Cancellation should not raise Error"
         }
 
     let receiveRacesWithPost
@@ -113,10 +111,10 @@ module CompatibilityTests =
             use postEv = new AutoResetEvent(false)
             use finishedEv = new AutoResetEvent(false)
             use cts = new CancellationTokenSource()
-            use mailboxCts = new CancellationTokenSource()
 
             let mb =
-                mailboxes.Create(
+                Mailboxes.create
+                    mailboxes
                     (fun inbox ->
                         cancellableTask {
                             while true do
@@ -128,10 +126,7 @@ module CompatibilityTests =
                                 finishedEv.Set()
                                 |> ignore
                         }
-                    ),
-                    false,
-                    mailboxCts.Token
-                )
+                    )
 
             let isErrored = firstFrom mb.Error
             mb.Start()
@@ -170,10 +165,6 @@ module CompatibilityTests =
             |> ignore
 
             do! post
-            mailboxCts.Cancel()
-
-            receiveEv.Set()
-            |> ignore
         }
 
     let afterDispose (mailboxes: IMailboxes) isThrowExceptionAfterDisposed =
@@ -246,6 +237,37 @@ module CompatibilityTests =
             Expect.equal mb.CurrentQueueLength 0 "Should clear the queue"
         }
 
+
+    /// controlMailbox/test.fsx `mailboxes ()`: `getSimpleMailbox` without the delay.
+    let getCounter (mailboxes: IMailboxes) =
+        Mailboxes.create
+            mailboxes
+            (fun inbox ->
+                let rec loop n =
+                    cancellableTask {
+                        match! inbox.Receive() with
+                        | Increment m -> return! loop (n + m)
+                        | Reset -> return! loop 0
+                        | Fetch reply ->
+                            reply.SetResult n
+                            return! loop n
+                    }
+
+                loop 0
+            )
+
+    /// controlMailbox/test.fsx `test6`: posts `Increment n` down to 0 and computes the same sum.
+    let rec compute (mb: IMailbox<Message>) n =
+        async {
+            mb.Post(Increment n)
+
+            if n <> 0 then
+                let! res = compute mb (n - 1)
+                return n + res
+            else
+                return 0
+        }
+
     let tests (mailboxes: IMailboxes) =
         testList mailboxes.Name [
             testList "MailboxProcessorType.fs" [
@@ -254,29 +276,6 @@ module CompatibilityTests =
                     use mb = getSimpleMailbox mailboxes
                     mb.Start()
                     Expect.equal mb.DefaultTimeout Timeout.Infinite "Should default to infinite"
-
-                testCaseTask "DefaultTimeout applies to Receive"
-                <| fun () ->
-                    task {
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun inbox ->
-                                    cancellableTask {
-                                        let! (_: int) = inbox.Receive()
-                                        ()
-                                    }
-                                )
-
-                        mb.DefaultTimeout <- 10
-                        let error = firstFrom mb.Error
-                        mb.Start()
-                        let! error = Expect.completesWithin waitTime error "Should time out"
-
-                        Expect.isTrue
-                            (error :? TimeoutException)
-                            $"Should be TimeoutException, was {error}"
-                    }
 
                 testCaseTask "Receive handles cancellation token"
                 <| fun () -> receiveHandlesCancellation mailboxes (fun inbox -> inbox.Receive())
@@ -369,196 +368,162 @@ module CompatibilityTests =
                     }
             ]
 
-            testList "Lifecycle" [
-                testCase "Start twice throws"
+            testList "controlMailbox test.fsx" [
+                testList "Post/Receive" [
+                    for n in
+                        [
+                            0
+                            1
+                            100
+                            1000
+                            100000
+                        ] do
+                        testCaseTask $"n={n}"
+                        <| fun () ->
+                            task {
+                                let received = ResizeArray()
+                                let completed = tcs<unit> ()
+
+                                use mb =
+                                    Mailboxes.create
+                                        mailboxes
+                                        (fun inbox ->
+                                            cancellableTask {
+                                                for _ in 0 .. n - 1 do
+                                                    let! msg = inbox.Receive()
+                                                    received.Add msg
+
+                                                completed.SetResult()
+                                            }
+                                        )
+
+                                mb.Start()
+
+                                for i in 0 .. n - 1 do
+                                    mb.Post i
+
+                                do!
+                                    Expect.completesWithin
+                                        waitTime
+                                        completed.Task
+                                        "Should receive all"
+
+                                Expect.equal
+                                    (List.ofSeq received)
+                                    [ 0 .. n - 1 ]
+                                    "Should receive in arrival order"
+                            }
+                ]
+
+                testCaseTask "Error (0)"
                 <| fun () ->
-                    use mb = getSimpleMailbox mailboxes
+                    task {
+                        use mb = Mailboxes.create mailboxes (fun _ -> cancellableTask { return () })
+                        let error = firstFrom mb.Error
+                        mb.Start()
+                        do! Task.Delay 200
+                        Expect.isFalse error.IsCompleted "Should not raise Error"
+                    }
+
+                testCaseTask "Error (1)"
+                <| fun () ->
+                    task {
+                        let fail = Exception "fail"
+
+                        use mb =
+                            Mailboxes.create mailboxes (fun _ -> cancellableTask { raise fail })
+
+                        let error = firstFrom mb.Error
+                        mb.Start()
+                        let! error = Expect.completesWithin waitTime error "Should raise Error"
+
+                        Expect.isTrue
+                            (obj.ReferenceEquals(error, fail))
+                            $"Should be the body's exception, was {error}"
+                    }
+
+                testCase "test5 - Mailbox.Start"
+                <| fun () ->
+                    use mb = getCounter mailboxes
                     mb.Start()
                     Expect.throwsT<InvalidOperationException> mb.Start "Should not start twice"
 
-                testCase "StartImmediate after Start throws"
-                <| fun () ->
-                    use mb = getSimpleMailbox mailboxes
-                    mb.Start()
-
-                    Expect.throwsT<InvalidOperationException>
-                        mb.StartImmediate
-                        "Should not start twice"
-
-                testCase "Start does not run the body on the caller's SynchronizationContext"
-                <| fun () ->
-                    let context = tcs<SynchronizationContext> ()
-
-                    use mb =
-                        Mailboxes.create
-                            mailboxes
-                            (fun _ ->
-                                cancellableTask {
-                                    context.SetResult SynchronizationContext.Current
-                                }
-                            )
-
-                    do
-                        use _ = setSyncContext (SynchronizationContext())
-                        mb.Start()
-
-                    Expect.isNull context.Task.Result "Should run on the thread pool"
-
-                testCase "StartImmediate runs the body on the caller's SynchronizationContext"
-                <| fun () ->
-                    let callerContext = SynchronizationContext()
-                    let mutable context = null
-
-                    use mb =
-                        Mailboxes.create
-                            mailboxes
-                            (fun _ -> cancellableTask { context <- SynchronizationContext.Current })
-
-                    do
-                        use _ = setSyncContext callerContext
-                        mb.StartImmediate()
-
-                    Expect.isTrue (obj.ReferenceEquals(context, callerContext)) "Should run inline"
-
-                testCase "Start with a cancelled token does not run the body"
-                <| fun () ->
-                    let mutable ran = false
-
-                    use mb =
-                        mailboxes.Create(
-                            (fun _ -> cancellableTask { ran <- true }),
-                            false,
-                            CancellationToken(true)
-                        )
-
-                    mb.Start()
-                    Thread.Sleep 100
-                    Expect.isFalse ran "Should not run"
-
-                testCase "StartImmediate with a cancelled token does not run the body"
-                <| fun () ->
-                    let mutable ran = false
-
-                    use mb =
-                        mailboxes.Create(
-                            (fun _ -> cancellableTask { ran <- true }),
-                            false,
-                            CancellationToken(true)
-                        )
-
-                    mb.StartImmediate()
-                    Expect.isFalse ran "Should not run"
-
-                testCase "Dispose twice does not throw"
-                <| fun () ->
-                    let mb = getSimpleMailbox mailboxes
-                    mb.Dispose()
-                    mb.Dispose()
-
-                testCaseTask "Dispose discards queued messages"
+                testCaseTask "test6a - mailbox & parallel"
                 <| fun () ->
                     task {
-                        let gate = tcs<unit> ()
-                        let received = tcs<int> ()
+                        use mb = getCounter mailboxes
+                        mb.Start()
+
+                        mb.Post Reset
+
+                        let! computations =
+                            Async.Parallel(List.map (compute mb) [ 1..50 ])
+                            |> Async.StartAsTask
+
+                        let reply = tcs<int> ()
+                        mb.Post(Fetch reply)
+                        let! mails = Expect.completesWithin waitTime reply.Task "Should reply"
+                        Expect.equal mails (Array.sum computations) "Should sum every Increment"
+                    }
+
+                testCaseTask "LotsOfMessages"
+                <| fun () ->
+                    task {
+                        let n = 200000
+                        let count = ref n
 
                         use mb =
                             Mailboxes.create
                                 mailboxes
                                 (fun inbox ->
                                     cancellableTask {
-                                        do! gate.Task
-                                        let! msg = inbox.Receive(200)
-                                        received.SetResult msg
+                                        while true do
+                                            let! (_: string) = inbox.Receive()
+
+                                            Interlocked.Decrement(&count.contents)
+                                            |> ignore
                                     }
                                 )
 
-                        let error = firstFrom mb.Error
-                        mb.Post 1
-                        mb.Post 2
                         mb.Start()
-                        mb.Dispose()
-                        gate.SetResult()
+
+                        for _ in 1..n do
+                            mb.Post "Message!"
+
+                        let mutable queueLength = mb.CurrentQueueLength
+
+                        while Volatile.Read(&count.contents) > 0 do
+                            let current = mb.CurrentQueueLength
+                            Expect.isLessThanOrEqual current queueLength "Should only drain"
+                            queueLength <- current
+                            do! Task.Delay 10
+
+                        Expect.equal mb.CurrentQueueLength 0 "Should drain to 0"
+                    }
+            ]
+
+            testList "Receive" [
+                testCaseTask "DefaultTimeout applies to Receive"
+                <| fun () ->
+                    task {
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! (_: int) = inbox.Receive()
+                                        ()
+                                    }
+                                )
+
+                        mb.DefaultTimeout <- 10
+                        let error = firstFrom mb.Error
+                        mb.Start()
                         let! error = Expect.completesWithin waitTime error "Should time out"
 
                         Expect.isTrue
                             (error :? TimeoutException)
                             $"Should be TimeoutException, was {error}"
-
-                        Expect.isFalse received.Task.IsCompleted "Should not receive"
-                    }
-
-                testCaseTask "Dispose does not cancel a waiting Receive"
-                <| fun () ->
-                    task {
-                        let disposed = tcs<unit> ()
-                        use cts = new CancellationTokenSource()
-
-                        let mb =
-                            mailboxes.Create(
-                                (fun inbox ->
-                                    cancellableTask {
-                                        use _ = makeDisposable disposed.SetResult
-                                        let! (_: int) = inbox.Receive()
-                                        ()
-                                    }
-                                ),
-                                false,
-                                cts.Token
-                            )
-
-                        let error = firstFrom mb.Error
-                        mb.Start()
-                        do! Task.Delay 50
-                        mb.Dispose()
-                        mb.Post 1
-                        do! Expect.staysIncomplete 200 disposed.Task "Body should keep waiting"
-                        Expect.isFalse error.IsCompleted "Should not raise Error"
-                        cts.Cancel()
-
-                        do!
-                            Expect.completesWithin
-                                waitTime
-                                disposed.Task
-                                "Token should still cancel"
-                    }
-            ]
-
-            testList "Receive" [
-                testCaseTask "Receives in arrival order"
-                <| fun () ->
-                    task {
-                        let received = tcs<int list> ()
-
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun inbox ->
-                                    cancellableTask {
-                                        let mutable msgs = []
-
-                                        for _ in 1..5 do
-                                            let! msg = inbox.Receive()
-
-                                            msgs <-
-                                                msg
-                                                :: msgs
-
-                                        received.SetResult(List.rev msgs)
-                                    }
-                                )
-
-                        for i in 1..3 do
-                            mb.Post i
-
-                        mb.Start()
-
-                        for i in 4..5 do
-                            mb.Post i
-
-                        let! received =
-                            Expect.completesWithin waitTime received.Task "Should receive"
-
-                        Expect.equal received [ 1..5 ] "Should receive in order"
                     }
 
                 testCaseTask "Receive 0 on an empty mailbox times out"
@@ -581,48 +546,6 @@ module CompatibilityTests =
                         Expect.isTrue
                             (error :? TimeoutException)
                             $"Should be TimeoutException, was {error}"
-                    }
-
-                testCaseTask "Receive 0 returns a queued message"
-                <| fun () ->
-                    task {
-                        let received = tcs<int> ()
-
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun inbox ->
-                                    cancellableTask {
-                                        let! msg = inbox.Receive(0)
-                                        received.SetResult msg
-                                    }
-                                )
-
-                        mb.Post 42
-                        mb.Start()
-
-                        let! received =
-                            Expect.completesWithin waitTime received.Task "Should receive"
-
-                        Expect.equal received 42 "Should receive the queued message"
-                    }
-
-                testCaseTask "Receive with a negative timeout waits indefinitely"
-                <| fun () ->
-                    task {
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun inbox ->
-                                    cancellableTask {
-                                        let! (_: int) = inbox.Receive(-5)
-                                        ()
-                                    }
-                                )
-
-                        let error = firstFrom mb.Error
-                        mb.Start()
-                        do! Expect.staysIncomplete 200 error "Should not time out"
                     }
 
                 testCaseTask "A message posted after a timeout is not lost"
@@ -658,6 +581,22 @@ module CompatibilityTests =
                     }
             ]
 
+            testList "Start" [
+                testCase "StartImmediate with a cancelled token does not run the body"
+                <| fun () ->
+                    let mutable ran = false
+
+                    use mb =
+                        mailboxes.Create(
+                            (fun _ -> cancellableTask { ran <- true }),
+                            false,
+                            CancellationToken(true)
+                        )
+
+                    mb.StartImmediate()
+                    Expect.isFalse ran "Should not run"
+            ]
+
             testList "CurrentQueueLength" [
                 testCase "Counts messages posted before Start"
                 <| fun () ->
@@ -665,118 +604,6 @@ module CompatibilityTests =
                     mb.Post Reset
                     mb.Post Reset
                     Expect.equal mb.CurrentQueueLength 2 "Should count queued messages"
-
-                testCaseTask "Decreases as messages are received"
-                <| fun () ->
-                    task {
-                        let length = tcs<int> ()
-
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun inbox ->
-                                    cancellableTask {
-                                        let! (_: int) = inbox.Receive()
-                                        length.SetResult inbox.CurrentQueueLength
-                                    }
-                                )
-
-                        for i in 1..3 do
-                            mb.Post i
-
-                        mb.Start()
-                        let! length = Expect.completesWithin waitTime length.Task "Should receive"
-                        Expect.equal length 2 "Should count the remaining messages"
-                    }
-
-                testCase "Is zero after Dispose"
-                <| fun () ->
-                    let mb = getSimpleMailbox mailboxes
-                    mb.Post Reset
-                    mb.Post Reset
-                    mb.Dispose()
-                    mb.Post Reset
-                    Expect.equal mb.CurrentQueueLength 0 "Should clear and drop messages"
-            ]
-
-            testList "Error" [
-                testCaseTask "Is raised with the body's exception"
-                <| fun () ->
-                    task {
-                        let boom = InvalidOperationException "boom"
-
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun _ ->
-                                    cancellableTask {
-                                        do! Task.Yield()
-                                        raise boom
-                                    }
-                                )
-
-                        let error = firstFrom mb.Error
-                        mb.Start()
-                        let! error = Expect.completesWithin waitTime error "Should raise Error"
-
-                        Expect.isTrue
-                            (obj.ReferenceEquals(error, boom))
-                            $"Should be the same exception, was {error}"
-                    }
-
-                testCase "Is raised on the calling thread when StartImmediate throws synchronously"
-                <| fun () ->
-                    let threadId = Thread.CurrentThread.ManagedThreadId
-                    let mutable errorThreadId = None
-
-                    use mb =
-                        Mailboxes.create mailboxes (fun _ -> cancellableTask { failwith "sync" })
-
-                    mb.Error.Add(fun _ ->
-                        errorThreadId <- Some Thread.CurrentThread.ManagedThreadId
-                    )
-
-                    mb.StartImmediate()
-                    Expect.equal errorThreadId (Some threadId) "Should raise inline"
-
-                testCaseTask
-                    "Is raised for OperationCanceledException when the token is not cancelled"
-                <| fun () ->
-                    task {
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun _ ->
-                                    cancellableTask {
-                                        do! Task.Yield()
-                                        raise (OperationCanceledException())
-                                    }
-                                )
-
-                        let error = firstFrom mb.Error
-                        mb.Start()
-                        let! error = Expect.completesWithin waitTime error "Should raise Error"
-
-                        Expect.isTrue
-                            (error :? OperationCanceledException)
-                            $"Should be OperationCanceledException, was {error}"
-                    }
-
-                testCaseTask "Is not raised when the body completes"
-                <| fun () ->
-                    task {
-                        let completed = tcs<unit> ()
-
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun _ -> cancellableTask { completed.SetResult() })
-
-                        let error = firstFrom mb.Error
-                        mb.Start()
-                        do! Expect.completesWithin waitTime completed.Task "Should run"
-                        do! Expect.staysIncomplete 100 error "Should not raise Error"
-                    }
             ]
         ]
 
