@@ -1,13 +1,13 @@
-name: Build master
+name: Build main
 
 on:
   # Runs only on pushes to the default branch or pull requests to the default branch
   push:
     branches:
-      - master
+      - main
   pull_request:
     branches:
-      - master
+      - main
 
 jobs:
   # Builds the project for all supported configurations and operating systems
