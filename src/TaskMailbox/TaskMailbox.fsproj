@@ -5,7 +5,6 @@
   <PropertyGroup>
     <Title>TaskMailbox</Title>
     <Description>A task-native F# MailboxProcessor built on IcedTasks CancellableTask and System.Threading.Channels</Description>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/Alterna-Dev-Studio/TaskMailbox</RepositoryUrl>
     <PackageProjectUrl>https://github.com/Alterna-Dev-Studio/TaskMailbox</PackageProjectUrl>
   </PropertyGroup>
