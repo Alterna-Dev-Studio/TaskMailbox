@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "fantomas": {
+      "version": "8.0.0-alpha-017",
+      "commands": [
+        "fantomas"
+      ],
+      "rollForward": false
+    },
+    "fsdocs-tool": {
+      "version": "20.0.0-alpha-018",
+      "commands": [
+        "fsdocs"
+      ],
+      "rollForward": false
+    }
+  }
+}

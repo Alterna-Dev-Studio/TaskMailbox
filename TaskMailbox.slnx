@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/FSharpBenchmarks/benchmarks.fsproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/TaskMailbox/TaskMailbox.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TaskMailbox.Tests/TaskMailbox.Tests.fsproj" />
+  </Folder>
+  <Project Path="build/build.fsproj" />
+</Solution>

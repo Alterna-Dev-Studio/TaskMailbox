@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <Title>TaskMailbox</Title>
+    <Description>A task-native F# MailboxProcessor built on IcedTasks CancellableTask and System.Threading.Channels</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="TaskMailboxProcessor.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="IcedTasks" />
+  </ItemGroup>
+</Project>

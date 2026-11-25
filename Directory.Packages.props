@@ -1,0 +1,36 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Dotnet Watch to know about this file -->
+    <Watch Include="$(MSBuildThisFileFullPath)"/>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <FakeVersion>6.1.3</FakeVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Main Package -->
+    <PackageVersion Include="FSharp.Core" Version="6.0.4" />
+    <PackageVersion Include="IcedTasks" Version="0.11.10" />
+
+    <!-- Benchmarks -->
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
+
+    <!-- Test -->
+    <PackageVersion Include="Expecto" Version="10.2.3" />
+    <PackageVersion Include="YoloDev.Expecto.TestSdk" Version="0.15.3" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+
+    <!-- Build -->
+    <PackageVersion Include="Fake.IO.FileSystem" Version="$(FakeVersion)" />
+    <PackageVersion Include="Fake.Core.Target" Version="$(FakeVersion)" />
+    <PackageVersion Include="Fake.Core.ReleaseNotes" Version="$(FakeVersion)" />
+    <PackageVersion Include="Fake.Core.Environment" Version="$(FakeVersion)" />
+    <PackageVersion Include="Fake.DotNet.Cli" Version="$(FakeVersion)" />
+    <PackageVersion Include="Fake.Core.Process" Version="$(FakeVersion)" />
+    <PackageVersion Include="Fake.BuildServer.GitHubActions" Version="$(FakeVersion)" />
+    <PackageVersion Include="MSBuild.StructuredLogger" Version="2.2.472" />
+  </ItemGroup>
+</Project>

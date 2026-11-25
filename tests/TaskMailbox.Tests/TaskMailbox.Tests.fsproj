@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <GenerateProgramFile>false</GenerateProgramFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/TaskMailbox/TaskMailbox.fsproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Expect.fs" />
+    <Compile Include="Mailboxes.fs" />
+    <Compile Include="CompatibilityTests.fs" />
+    <Compile Include="TaskMailboxProcessorTests.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The FSharp.Core MailboxProcessor oracle is the current release, not the version the library builds against -->
+    <PackageReference Include="FSharp.Core" VersionOverride="10.0.103" />
+  </ItemGroup>
+</Project>
