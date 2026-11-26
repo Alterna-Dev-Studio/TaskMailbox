@@ -15,6 +15,31 @@ module TaskMailboxProcessorTests =
     let idle () =
         new TaskMailboxProcessor<int>(fun _ -> cancellableTask { () })
 
+    /// FSharp.Core ignores the caller's token here (mailbox.fs `waitOne`); TaskMailbox cancels.
+    let cancelsInfiniteWait
+        name
+        (call: TaskMailboxProcessor<int> -> CancellationToken -> Task<'T>)
+        =
+        testCaseTask
+            $"Throws OperationCanceledException when the caller cancels an infinite wait ({name})"
+        <| fun () ->
+            task {
+                use mb = idle ()
+                use cts = new CancellationTokenSource()
+                cts.CancelAfter 10
+
+                do!
+                    Expect.throwsTaskT<OperationCanceledException>
+                        (fun () ->
+                            Expect.completesWithin
+                                waitTime
+                                (call mb cts.Token)
+                                "Should cancel an infinite wait"
+                            :> Task
+                        )
+                        "Should cancel an infinite wait"
+            }
+
     [<Tests>]
     let taskMailboxProcessorTests =
         testList "TaskMailboxProcessor" [
@@ -46,6 +71,14 @@ module TaskMailboxProcessorTests =
                         let! msg = first
                         Expect.equal msg 1 "First Receive should still receive"
                     }
+
+                cancelsInfiniteWait "no timeout" (fun mb ct -> mb.Receive () ct)
+                cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
+            ]
+
+            testList "TryReceive" [
+                cancelsInfiniteWait "no timeout" (fun mb ct -> mb.TryReceive () ct)
+                cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.TryReceive (-2) ct)
             ]
 
             testList "Error" [

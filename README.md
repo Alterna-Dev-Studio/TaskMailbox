@@ -5,7 +5,7 @@
 A task-native [MailboxProcessor](https://fsharp.github.io/fsharp-core-docs/reference/fsharp-control-fsharpmailboxprocessor-1.html). The body is an [IcedTasks](https://github.com/TheAngryByrd/IcedTasks) `CancellableTask` instead of an `Async`, and messages queue in a [System.Threading.Channels](https://learn.microsoft.com/en-us/dotnet/core/extensions/channels) channel.
 
 - `TaskMailboxProcessor<'Msg>` - Same shape and semantics as FSharp.Core's `MailboxProcessor<'Msg>`.
-    - `Post`, `Receive`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, `Dispose`
+    - `Post`, `Receive`, `TryReceive`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, `Dispose`
 - `mailbox` - A `cancellableTask` whose `return!` is a tail call, so a recursive agent loop runs in constant stack and memory.
 
 ## Why should I use this?

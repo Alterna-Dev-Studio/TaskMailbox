@@ -8,6 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `TaskMailboxProcessor<'Msg>` with `Post`, `Receive`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, and `Dispose`
+- `TaskMailboxProcessor<'Msg>` with `Post`, `Receive`, `TryReceive`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, and `Dispose`
 - `mailbox { }` computation expression whose `return!` is a tail call, for recursive agent loops
 - Compatibility tests that run the same scenarios against FSharp.Core's `MailboxProcessor`

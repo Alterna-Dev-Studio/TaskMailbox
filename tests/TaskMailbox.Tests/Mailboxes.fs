@@ -9,6 +9,7 @@ open TaskMailbox
 /// The receiving side of a mailbox, as seen by its body.
 type IInbox<'Msg> =
     abstract Receive: ?timeout: int -> CancellableTask<'Msg>
+    abstract TryReceive: ?timeout: int -> CancellableTask<'Msg option>
     abstract CurrentQueueLength: int
 
 /// The owning side of a mailbox.
@@ -70,6 +71,10 @@ module Mailboxes =
                             let receive = mb.Receive(?timeout = timeout)
                             fun ct -> Async.StartImmediateAsTask(receive, ct)
 
+                        member _.TryReceive(?timeout) =
+                            let tryReceive = mb.TryReceive(?timeout = timeout)
+                            fun ct -> Async.StartImmediateAsTask(tryReceive, ct)
+
                         member _.CurrentQueueLength = mb.CurrentQueueLength
                     }
 
@@ -104,6 +109,7 @@ module Mailboxes =
                 let inbox (mb: TaskMailboxProcessor<_>) =
                     { new IInbox<_> with
                         member _.Receive(?timeout) = mb.Receive(?timeout = timeout)
+                        member _.TryReceive(?timeout) = mb.TryReceive(?timeout = timeout)
                         member _.CurrentQueueLength = mb.CurrentQueueLength
                     }
 
