@@ -69,8 +69,8 @@ type TaskMailboxProcessor<'Msg>
     let scanTimedOut () =
         TimeoutException("TaskMailboxProcessor.Scan timed out.")
 
-    // Only the caller's token or the timeout ends this wait; the reply task never faults, so a
-    // caught TimeoutException can only be WaitAsync's own.
+    // The reply task faults only with ObjectDisposedException, when Dispose races the request;
+    // a caught TimeoutException is still only WaitAsync's own.
     let waitReply (reply: Task<'R>) (timeout: int) (ct: CancellationToken) : Task<'R voption> =
         task {
             try
@@ -527,7 +527,10 @@ type TaskMailboxProcessor<'Msg>
         let timeout = defaultArg timeout defaultTimeout
         let reply = x.PostRequest(buildMessage, timeout)
 
-        if reply.Wait timeout then Some reply.Result else None
+        if Task.WaitAny([| reply :> Task |], timeout) = 0 then
+            Some(reply.GetAwaiter().GetResult())
+        else
+            None
 
     /// <summary>Posts a request and blocks the calling thread until its reply arrives.</summary>
     /// <remarks>Calling it from the agent's own body deadlocks, as FSharp.Core.</remarks>

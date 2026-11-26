@@ -18,4 +18,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `StartImmediate` no longer resumes the body on the caller's `SynchronizationContext`
 
 ### Fixed
-- A request that races `Dispose` now fails its reply with `ObjectDisposedException` instead of being silently dropped
+- A request that races `Dispose` fails with `ObjectDisposedException` from all four request members instead of being silently dropped

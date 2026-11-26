@@ -587,44 +587,130 @@ module TaskMailboxProcessorTests =
                             "The agent should receive the already-posted message first"
                     }
 
+                // Each member's call to the agent's reply channel, ignoring the reply value.
+                let replyOps
+                    : (string *
+                      (TaskMailboxProcessor<TaskReplyChannel<int>> -> CancellationToken -> Task)) list = [
+                    "PostAndAsyncReply",
+                    (fun mb ct ->
+                        task {
+                            let! _ = (mb.PostAndAsyncReply id) ct
+                            ()
+                        }
+                    )
+
+                    "PostAndTryAsyncReply",
+                    (fun mb ct ->
+                        task {
+                            let! _ = (mb.PostAndTryAsyncReply id) ct
+                            ()
+                        }
+                    )
+                ]
+
+                testCaseTask "Reply does not run the caller's continuation inline"
+                <| fun () ->
+                    task {
+                        for name, op in replyOps do
+                            let gate = tcs<unit> ()
+                            let afterReply = TaskCompletionSource()
+
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun inbox ->
+                                    cancellableTask {
+                                        let! (r: TaskReplyChannel<int>) = inbox.Receive()
+                                        do! gate.Task
+                                        r.Reply 1
+                                        afterReply.SetResult()
+                                    }
+                                )
+
+                            mb.Start()
+
+                            let caller =
+                                task {
+                                    do! op mb CancellationToken.None
+                                    return afterReply.Task.Wait 1000
+                                }
+
+                            Expect.isFalse
+                                caller.IsCompleted
+                                $"Should be waiting on the gate ({name})"
+
+                            gate.SetResult()
+
+                            let! ok =
+                                Expect.completesWithin waitTime caller $"Should reply ({name})"
+
+                            Expect.isTrue
+                                ok
+                                $"Reply should not run the caller's continuation inline ({name})"
+                    }
+
+                // Both async request members. Each builds its op once, so running it twice
+                // reuses the same cold CancellableTask, as a caller would.
+                let asyncRequestCalls
+                    : (string *
+                      (TaskMailboxProcessor<TaskReplyChannel<int>>
+                              -> (TaskReplyChannel<int> -> TaskReplyChannel<int>)
+                              -> (CancellationToken -> Task<int>))) list = [
+                    "PostAndTryAsyncReply",
+                    (fun mb build ->
+                        let op = mb.PostAndTryAsyncReply build
+
+                        fun ct ->
+                            task {
+                                let! r = op ct
+                                return r.Value
+                            }
+                    )
+
+                    "PostAndAsyncReply", (fun mb build -> mb.PostAndAsyncReply build)
+                ]
+
                 testCaseTask "Running the same op twice posts two requests, each with its own reply"
                 <| fun () ->
                     task {
-                        use mb =
-                            new TaskMailboxProcessor<TaskReplyChannel<int>>(fun inbox ->
-                                let rec loop n =
-                                    mailbox {
-                                        let! (r: TaskReplyChannel<int>) = inbox.Receive()
-                                        r.Reply n
-                                        return! loop (n + 1)
-                                    }
+                        for name, call in asyncRequestCalls do
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun inbox ->
+                                    let rec loop n =
+                                        mailbox {
+                                            let! (r: TaskReplyChannel<int>) = inbox.Receive()
+                                            r.Reply n
+                                            return! loop (n + 1)
+                                        }
 
-                                loop 1
-                            )
+                                    loop 1
+                                )
 
-                        mb.Start()
-                        let mutable builds = 0
+                            mb.Start()
+                            let mutable builds = 0
 
-                        let build (ch: TaskReplyChannel<int>) =
-                            builds <- builds + 1
-                            ch
+                            let build (ch: TaskReplyChannel<int>) =
+                                builds <- builds + 1
+                                ch
 
-                        let op = mb.PostAndAsyncReply build
+                            let op = call mb build
 
-                        let! r1 =
-                            Expect.completesWithin
-                                waitTime
-                                (op CancellationToken.None)
-                                "Should reply"
+                            let! r1 =
+                                Expect.completesWithin
+                                    waitTime
+                                    (op CancellationToken.None)
+                                    $"Should reply ({name})"
 
-                        let! r2 =
-                            Expect.completesWithin
-                                waitTime
-                                (op CancellationToken.None)
-                                "Should reply"
+                            let! r2 =
+                                Expect.completesWithin
+                                    waitTime
+                                    (op CancellationToken.None)
+                                    $"Should reply ({name})"
 
-                        Expect.equal builds 2 "Should call buildMessage for each run"
-                        Expect.equal (r1, r2) (1, 2) "Should get a fresh reply for each run"
+                            Expect.equal builds 2 $"Should call buildMessage for each run ({name})"
+
+                            Expect.equal
+                                (r1, r2)
+                                (1, 2)
+                                $"Should get a fresh reply for each run ({name})"
                     }
 
                 testCaseTask
@@ -698,6 +784,39 @@ module TaskMailboxProcessorTests =
                                     Expect.equal builds 0 "Should not call buildMessage"
                                 }
                     ]
+
+                testCaseTask
+                    "A request whose buildMessage disposes the agent fails with ObjectDisposedException"
+                <| fun () ->
+                    task {
+                        for name, call in requestCalls None do
+                            let mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                    cancellableTask { () }
+                                )
+
+                            mb.Start()
+
+                            let build (ch: TaskReplyChannel<int>) =
+                                mb.Dispose()
+                                ch
+
+                            do!
+                                Expect.throwsTaskT<ObjectDisposedException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (task {
+                                                do! call mb build
+                                                return ()
+                                            })
+                                            $"Should complete ({name})"
+                                        :> Task
+                                    )
+                                    $"Should throw ObjectDisposedException ({name})"
+
+                            Expect.equal mb.CurrentQueueLength 0 $"Should post nothing ({name})"
+                    }
             ]
 
             testList "Error" [
