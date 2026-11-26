@@ -11,11 +11,6 @@ module TestHelpers =
             member this.Dispose() = callback ()
         }
 
-    let setSyncContext newContext =
-        let oldContext = SynchronizationContext.Current
-        SynchronizationContext.SetSynchronizationContext newContext
-        makeDisposable (fun () -> SynchronizationContext.SetSynchronizationContext oldContext)
-
     /// A TaskCompletionSource whose continuations do not run inline on the completing thread.
     let tcs<'T> () =
         TaskCompletionSource<'T>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -54,15 +49,6 @@ module Expect =
                 failtestf "%s. Did not complete within %dms" message millisecondsTimeout
 
             return! t
-        }
-
-    /// Expects `t` to still be incomplete after `milliseconds`.
-    let staysIncomplete (milliseconds: int) (t: Task) message =
-        task {
-            do! Task.Delay milliseconds
-
-            if t.IsCompleted then
-                failtestf "%s. Completed with status %A" message t.Status
         }
 
     /// Expects the task `f` returns to fail with `'Exn`.
