@@ -272,6 +272,24 @@ module TaskMailboxProcessorTests =
                     (fun mb ct -> mb.TryScan (neverMatches, waitTime) ct)
             ]
 
+            testList "TaskReplyChannel" [
+                testCase "A user-constructed channel passes every Reply through"
+                <| fun () ->
+                    let seen = ResizeArray<int>()
+                    let channel = TaskReplyChannel<int>(seen.Add)
+
+                    channel.Reply 1
+                    channel.Reply 2
+
+                    Expect.equal
+                        (List.ofSeq seen)
+                        [
+                            1
+                            2
+                        ]
+                        "Should see every reply"
+            ]
+
             testList "Error" [
                 testCaseTask
                     "Is raised for OperationCanceledException when the token is not cancelled"

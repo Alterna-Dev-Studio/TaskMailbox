@@ -512,6 +512,256 @@ module CompatibilityTests =
                 return 0
         }
 
+    type CounterMsg =
+        | Bump of int
+        | Zero
+        | Get of Replier<int>
+
+    /// Like `getCounter`, but fetched through a request's reply channel rather than a bare TCS.
+    let getReplyCounter (mailboxes: IMailboxes) =
+        Mailboxes.start
+            mailboxes
+            (fun inbox ->
+                cancellableTask {
+                    let mutable n = 0
+
+                    while true do
+                        match! inbox.Receive() with
+                        | Bump m -> n <- n + m
+                        | Zero -> n <- 0
+                        | Get reply -> reply.Reply n
+                }
+            )
+
+    /// Like `compute`, for `CounterMsg`.
+    let rec computeCounter (mb: IMailbox<CounterMsg>) n =
+        async {
+            mb.Post(Bump n)
+
+            if n <> 0 then
+                let! res = computeCounter mb (n - 1)
+                return n + res
+            else
+                return 0
+        }
+
+    /// controlMailbox/test.fsx test6d/test6e, and dotnet/fsharp controlMailbox c32398u8/u9,
+    /// run against `PostAndAsyncReply`/`PostAndTryAsyncReply`.
+    let requestReplyTests (mailboxes: IMailboxes) =
+        testList "Request/reply" [
+            testCaseTask "PostAndAsyncReply returns the echo agent's reply"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    while true do
+                                        let! (r: Replier<int>) = inbox.Receive()
+                                        r.Reply 42
+                                }
+                            )
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply"
+
+                    Expect.equal reply 42 "Should get the echoed reply"
+                }
+
+            testCaseTask "PostAndTryAsyncReply returns Some for the echo agent's reply"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    while true do
+                                        let! (r: Replier<int>) = inbox.Receive()
+                                        r.Reply 42
+                                }
+                            )
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndTryAsyncReply id) CancellationToken.None)
+                            "Should reply"
+
+                    Expect.equal reply (Some 42) "Should get Some the echoed reply"
+                }
+
+            testCaseTask "c32398u8 - two sequential requests each get their own reply"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    let! (r1: Replier<int>) = inbox.Receive()
+                                    r1.Reply 100
+                                    let! (r2: Replier<int>) = inbox.Receive()
+                                    r2.Reply 200
+                                }
+                            )
+
+                    let! reply1 =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply 100"
+
+                    let! reply2 =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply 200"
+
+                    Expect.equal (reply1, reply2) (100, 200) "Should get each reply in order"
+                }
+
+            testCaseTask "c32398u9 - a TryReceive-driven agent replies to sequential requests"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    match! inbox.TryReceive() with
+                                    | Some(r1: Replier<int>) ->
+                                        r1.Reply 100
+
+                                        match! inbox.TryReceive() with
+                                        | Some(r2: Replier<int>) -> r2.Reply 200
+                                        | None -> failwith "Should receive"
+                                    | None -> failwith "Should receive"
+                                }
+                            )
+
+                    let! reply1 =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply 100"
+
+                    let! reply2 =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply 200"
+
+                    Expect.equal (reply1, reply2) (100, 200) "Should get each reply in order"
+                }
+
+            testCaseTask "A reply sent from inside a Scan computation reaches the caller"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    let! (_: int) =
+                                        inbox.Scan(fun (r: Replier<int>) ->
+                                            Some(
+                                                cancellableTask {
+                                                    r.Reply 7
+                                                    return 0
+                                                }
+                                            )
+                                        )
+
+                                    ()
+                                }
+                            )
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply"
+
+                    Expect.equal reply 7 "Should get the reply sent from the Scan computation"
+                }
+
+            testCaseTask
+                "Only the first of two replies reaches the caller; the second does not throw"
+            <| fun () ->
+                task {
+                    let secondReplied = tcs<unit> ()
+
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    let! (r: Replier<int>) = inbox.Receive()
+                                    r.Reply 1
+                                    r.Reply 2
+                                    secondReplied.SetResult()
+                                }
+                            )
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply id) CancellationToken.None)
+                            "Should reply"
+
+                    Expect.equal reply 1 "Should get only the first reply"
+
+                    do!
+                        Expect.completesWithin
+                            waitTime
+                            secondReplied.Task
+                            "Second Reply should not throw"
+                }
+
+            testCaseTask "test6d - PostAndTryAsyncReply after posts returns the expected total"
+            <| fun () ->
+                task {
+                    use mb = getReplyCounter mailboxes
+                    mb.Post Zero
+
+                    let! computations =
+                        Async.Parallel(List.map (computeCounter mb) [ 1..50 ])
+                        |> Async.StartAsTask
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndTryAsyncReply Get) CancellationToken.None)
+                            "Should reply"
+
+                    Expect.equal reply (Some(Array.sum computations)) "Should sum every Bump"
+                }
+
+            testCaseTask "test6e - PostAndAsyncReply after posts returns the expected total"
+            <| fun () ->
+                task {
+                    use mb = getReplyCounter mailboxes
+                    mb.Post Zero
+
+                    let! computations =
+                        Async.Parallel(List.map (computeCounter mb) [ 1..50 ])
+                        |> Async.StartAsTask
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            ((mb.PostAndAsyncReply Get) CancellationToken.None)
+                            "Should reply"
+
+                    Expect.equal reply (Array.sum computations) "Should sum every Bump"
+                }
+        ]
+
     /// A recursive `mailbox { }` body, the MailboxProcessor idiom.
     let mailboxTests (mailboxes: IMailboxes) =
         testList "mailbox { }" [
@@ -2240,6 +2490,7 @@ module CompatibilityTests =
             ]
 
             mailboxTests mailboxes
+            requestReplyTests mailboxes
         ]
 
     [<Tests>]
