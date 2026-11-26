@@ -1,6 +1,7 @@
 namespace TaskMailbox.Tests
 
 open System
+open System.Collections.Concurrent
 open System.Threading
 open System.Threading.Tasks
 open Expecto
@@ -1344,6 +1345,266 @@ module CompatibilityTests =
                             Expect.completesWithin waitTime received.Task "Should receive"
 
                         Expect.equal received 7 "Should receive the later message"
+                    }
+            ]
+
+            testList "Scan" [
+                testCaseTask "Scan takes a message out of order"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+                        mb.Post 2
+                        mb.Post 3
+                        mb.Post 4
+
+                        let scanner m =
+                            if m = 3 then Some(cancellableTask { return m }) else None
+
+                        let! scanned =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.Scan(scanner)) CancellationToken.None)
+                                "Should scan"
+
+                        Expect.equal scanned 3 "Should match 3 out of order"
+
+                        let! r1 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal r1 1 "Should receive skipped 1 first"
+
+                        let! r2 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.TryReceive () CancellationToken.None)
+                                "Should try-receive"
+
+                        Expect.equal r2 (Some 2) "Should receive skipped 2"
+
+                        let! r3 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal r3 4 "Should receive arrival 4"
+                    }
+
+                testCaseTask "TryScan re-offers skipped messages before arrivals, in order"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+                        let seen = ConcurrentQueue<int>()
+
+                        mb.Post 1
+                        mb.Post 2
+
+                        let scanTask =
+                            (inbox.TryScan(fun m ->
+                                seen.Enqueue m
+                                if m = 3 then Some(cancellableTask { return m }) else None
+                            ))
+                                CancellationToken.None
+
+                        mb.Post 3
+
+                        let! scanned = Expect.completesWithin waitTime scanTask "Should scan"
+                        Expect.equal scanned (Some 3) "Should match 3"
+
+                        Expect.equal
+                            (List.ofSeq seen)
+                            [
+                                1
+                                2
+                                3
+                            ]
+                            "Should see skipped messages then arrivals"
+
+                        seen.Clear()
+                        mb.Post 4
+
+                        let! scanned2 =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(fun m ->
+                                    seen.Enqueue m
+                                    if m = 4 then Some(cancellableTask { return m }) else None
+                                ))
+                                    CancellationToken.None)
+                                "Should scan again"
+
+                        Expect.equal scanned2 (Some 4) "Should match 4"
+
+                        Expect.equal
+                            (List.ofSeq seen)
+                            [
+                                1
+                                2
+                                4
+                            ]
+                            "Should re-offer skipped 1 and 2, then arrival 4"
+                    }
+
+                testCaseTask "Scan waits for a match posted later"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        let scanTask =
+                            (inbox.Scan(fun m ->
+                                if m = 5 then Some(cancellableTask { return m }) else None
+                            ))
+                                CancellationToken.None
+
+                        mb.Post 1
+                        mb.Post 5
+
+                        let! scanned = Expect.completesWithin waitTime scanTask "Should scan"
+                        Expect.equal scanned 5 "Should match the later message"
+                    }
+
+                testCaseTask "Scan runs only the matched message's computation, once"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+                        let ran = ConcurrentQueue<int>()
+
+                        mb.Post 1
+                        mb.Post 2
+                        mb.Post 3
+
+                        let scanner m =
+                            let computation =
+                                cancellableTask {
+                                    ran.Enqueue m
+                                    return m
+                                }
+
+                            if m = 2 then Some computation else None
+
+                        let! scanned =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.Scan(scanner)) CancellationToken.None)
+                                "Should scan"
+
+                        Expect.equal scanned 2 "Should match 2"
+
+                        Expect.equal
+                            (List.ofSeq ran)
+                            [ 2 ]
+                            "Should run only the matched computation"
+                    }
+
+                testCaseTask "CurrentQueueLength counts skipped messages"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+                        mb.Post 2
+                        mb.Post 3
+
+                        let! scanned =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.Scan(fun m ->
+                                    if m = 3 then Some(cancellableTask { return m }) else None
+                                ))
+                                    CancellationToken.None)
+                                "Should scan"
+
+                        Expect.equal scanned 3 "Should match 3"
+                        Expect.equal inbox.CurrentQueueLength 2 "Should count the skipped messages"
+                    }
+
+                testCaseTask "A Scan computation can Receive"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+                        mb.Post 2
+                        mb.Post 3
+
+                        let scanner m =
+                            if m = 2 then
+                                Some(
+                                    cancellableTask {
+                                        let! r = inbox.Receive()
+                                        return m, r
+                                    }
+                                )
+                            else
+                                None
+
+                        let! result =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.Scan(scanner)) CancellationToken.None)
+                                "Should scan"
+
+                        Expect.equal
+                            result
+                            (2, 1)
+                            "Should receive the skipped message from the computation"
+                    }
+
+                testCaseTask "A Scan computation's exception propagates and the message is consumed"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+                        let boom = Exception "boom"
+
+                        mb.Post 1
+                        mb.Post 2
+
+                        let scanner m =
+                            if m = 2 then
+                                Some(cancellableTask { return raise boom })
+                            else
+                                None
+
+                        let! thrown =
+                            task {
+                                try
+                                    let! (_: int) = (inbox.Scan(scanner)) CancellationToken.None
+                                    return None
+                                with e ->
+                                    return Some e
+                            }
+
+                        match thrown with
+                        | Some e ->
+                            Expect.isTrue
+                                (obj.ReferenceEquals(e, boom))
+                                $"Should be the computation's own exception, was {e}"
+                        | None -> failtest "Should propagate the computation's exception"
+
+                        let! r1 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal r1 1 "Should receive the skipped message"
+
+                        Expect.equal
+                            inbox.CurrentQueueLength
+                            0
+                            "Should have consumed the matched message"
                     }
             ]
 
