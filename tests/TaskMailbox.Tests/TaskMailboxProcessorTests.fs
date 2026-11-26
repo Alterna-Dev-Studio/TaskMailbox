@@ -47,16 +47,14 @@ module TaskMailboxProcessorTests =
             task {
                 use mb = new TaskMailboxProcessor<'Msg>(fun _ -> cancellableTask { () })
                 use cts = new CancellationTokenSource()
-                cts.CancelAfter 10
+                let t = call mb cts.Token
+                Expect.isFalse t.IsCompleted "Should be waiting"
+                cts.Cancel()
 
                 do!
                     Expect.throwsTaskT<OperationCanceledException>
                         (fun () ->
-                            Expect.completesWithin
-                                waitTime
-                                (call mb cts.Token)
-                                "Should cancel an infinite wait"
-                            :> Task
+                            Expect.completesWithin 1000 t "Should cancel an infinite wait" :> Task
                         )
                         "Should cancel an infinite wait"
             }
@@ -75,16 +73,14 @@ module TaskMailboxProcessorTests =
             task {
                 use mb = createMb ()
                 use cts = new CancellationTokenSource()
-                cts.CancelAfter 10
+                let t = call mb cts.Token
+                Expect.isFalse t.IsCompleted "Should be waiting"
+                cts.Cancel()
 
                 do!
                     Expect.throwsTaskT<OperationCanceledException>
                         (fun () ->
-                            Expect.completesWithin
-                                waitTime
-                                (call mb cts.Token)
-                                "Should cancel a finite wait"
-                            :> Task
+                            Expect.completesWithin 1000 t "Should cancel a finite wait" :> Task
                         )
                         "Should cancel a finite wait"
             }
@@ -97,11 +93,17 @@ module TaskMailboxProcessorTests =
                 <| fun () ->
                     task {
                         use mb = idle ()
-                        use cts = new CancellationTokenSource(10)
+                        use cts = new CancellationTokenSource()
+                        let t = mb.Receive waitTime cts.Token
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
 
                         do!
                             Expect.throwsTaskT<OperationCanceledException>
-                                (fun () -> mb.Receive waitTime cts.Token :> Task)
+                                (fun () ->
+                                    Expect.completesWithin 1000 t "Should cancel, not time out"
+                                    :> Task
+                                )
                                 "Should cancel, not time out"
                     }
 

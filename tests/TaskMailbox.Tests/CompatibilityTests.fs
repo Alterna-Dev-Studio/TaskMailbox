@@ -172,17 +172,13 @@ module CompatibilityTests =
             use cts = new CancellationTokenSource()
             let! _, inbox = startAndGetInbox mailboxes cts
             use callerCts = new CancellationTokenSource()
-            callerCts.CancelAfter 20
+            let t = (receive inbox) callerCts.Token
+            Expect.isFalse t.IsCompleted "Should be waiting"
+            callerCts.Cancel()
 
             do!
                 Expect.throwsTaskT<OperationCanceledException>
-                    (fun () ->
-                        Expect.completesWithin
-                            waitTime
-                            ((receive inbox) callerCts.Token)
-                            "Should cancel, not time out"
-                        :> Task
-                    )
+                    (fun () -> Expect.completesWithin 1000 t "Should cancel, not time out" :> Task)
                     "Should cancel, not time out"
         }
 
@@ -257,17 +253,13 @@ module CompatibilityTests =
             use cts = new CancellationTokenSource()
             let! mb, inbox = startAndGetInbox mailboxes cts
             use callerCts = new CancellationTokenSource()
-            callerCts.CancelAfter 20
+            let t = (receive inbox) callerCts.Token
+            Expect.isFalse t.IsCompleted "Should be waiting"
+            callerCts.Cancel()
 
             do!
                 Expect.throwsTaskT<OperationCanceledException>
-                    (fun () ->
-                        Expect.completesWithin
-                            waitTime
-                            ((receive inbox) callerCts.Token)
-                            "Should cancel"
-                        :> Task
-                    )
+                    (fun () -> Expect.completesWithin 1000 t "Should cancel" :> Task)
                     "Should cancel"
 
             mb.Post 9
@@ -1499,15 +1491,14 @@ module CompatibilityTests =
                                     use mb = unresponsiveAgent withToken
                                     mb.Start()
                                     use cts = new CancellationTokenSource()
-                                    cts.CancelAfter 10
+                                    let t = call mb timeout cts.Token
+                                    Expect.isFalse t.IsCompleted "Should be waiting"
+                                    cts.Cancel()
 
                                     do!
                                         Expect.throwsTaskT<OperationCanceledException>
                                             (fun () ->
-                                                Expect.completesWithin
-                                                    waitTime
-                                                    (call mb timeout cts.Token)
-                                                    "Should cancel"
+                                                Expect.completesWithin 1000 t "Should cancel"
                                                 :> Task
                                             )
                                             "Should cancel"
