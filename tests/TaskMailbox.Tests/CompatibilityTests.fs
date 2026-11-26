@@ -1993,6 +1993,10 @@ module CompatibilityTests =
                 <| fun () ->
                     receiveHandlesCancellation mailboxes (fun inbox -> inbox.Receive(100000))
 
+                testCaseTask "Scan handles cancellation token"
+                <| fun () ->
+                    receiveHandlesCancellation mailboxes (fun inbox -> inbox.Scan(matchesAll))
+
                 testCaseTask
                     "Receive Races with Post"
                     (fun () -> receiveRacesWithPost mailboxes 100000 (fun inbox -> inbox.Receive()))
@@ -3091,14 +3095,6 @@ module CompatibilityTests =
 
                         Expect.equal inbox.CurrentQueueLength 0 "Should drop skipped messages"
 
-                        let! received =
-                            Expect.completesWithin
-                                waitTime
-                                (inbox.TryReceive (0) CancellationToken.None)
-                                "Should try-receive"
-
-                        Expect.equal received None "Should not receive after Dispose"
-
                         let! scanned =
                             Expect.completesWithin
                                 waitTime
@@ -3106,6 +3102,80 @@ module CompatibilityTests =
                                 "Should try-scan"
 
                         Expect.equal scanned None "Should not scan after Dispose"
+
+                        let! received =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.TryReceive (0) CancellationToken.None)
+                                "Should try-receive"
+
+                        Expect.equal received None "Should not receive after Dispose"
+                    }
+
+                testCaseTask "Scan after Dispose does not return a message queued before Dispose"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+
+                        mb.Dispose()
+
+                        let! scanned =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(matchesAll, 0)) CancellationToken.None)
+                                "Should try-scan"
+
+                        Expect.equal
+                            scanned
+                            None
+                            "Should not return a message queued before Dispose"
+
+                        Expect.equal inbox.CurrentQueueLength 0 "Should report no queued messages"
+                    }
+
+                testCaseTask "Scan matching a skipped message consumes it"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+                        mb.Post 2
+
+                        let! none =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(neverMatches, 0)) CancellationToken.None)
+                                "Should try-scan"
+
+                        Expect.equal none None "Should skip both"
+
+                        let scanner m =
+                            if m = 1 then Some(cancellableTask { return m }) else None
+
+                        let! scanned =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(scanner, 0)) CancellationToken.None)
+                                "Should try-scan"
+
+                        Expect.equal scanned (Some 1) "Should match the skipped message"
+
+                        Expect.equal
+                            inbox.CurrentQueueLength
+                            1
+                            "Should drop the matched message from the skipped count"
+
+                        let! r2 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal r2 2 "Should receive the other skipped message"
                     }
 
                 testCaseTask "A scanner exception leaves a skipped message queued"
