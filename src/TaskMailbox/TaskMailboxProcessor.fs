@@ -48,6 +48,21 @@ type TaskMailboxProcessor<'Msg>
 
     let isDisposed () = Volatile.Read(&disposed) = 1
 
+    // Returns false if the message was dropped because the mailbox is disposed
+    let tryWrite (message: 'Msg) =
+        if isDisposed () then
+            false
+        else
+            // Counted first so a concurrent read cannot make the count negative
+            Interlocked.Increment(&queueLength)
+            |> ignore
+
+            // An unbounded channel that is never completed always accepts
+            arrivals.Writer.TryWrite message
+            |> ignore
+
+            true
+
     let timedOut () =
         TimeoutException("TaskMailboxProcessor.Receive timed out.")
 
@@ -341,17 +356,11 @@ type TaskMailboxProcessor<'Msg>
     /// <param name="message">The message to post.</param>
     /// <exception cref='T:System.ObjectDisposedException'>Thrown after <c>Dispose</c> when the agent was created with <c>isThrowExceptionAfterDisposed</c>.</exception>
     member _.Post(message: 'Msg) =
-        if isDisposed () then
-            if isThrowExceptionAfterDisposed then
-                raise (ObjectDisposedException(nameof TaskMailboxProcessor))
-        else
-            // Counted first so a concurrent read cannot make the count negative
-            Interlocked.Increment(&queueLength)
-            |> ignore
-
-            // An unbounded channel that is never completed always accepts
-            arrivals.Writer.TryWrite message
-            |> ignore
+        if
+            not (tryWrite message)
+            && isThrowExceptionAfterDisposed
+        then
+            raise (ObjectDisposedException(nameof TaskMailboxProcessor))
 
     /// Builds a reply channel, posts the message it produces, and returns a task for its reply.
     /// Validates the timeout first; FSharp.Core posts before validating.
@@ -376,7 +385,11 @@ type TaskMailboxProcessor<'Msg>
                 )
             )
 
-        x.Post msg
+        // Dispose raced the check above and the message was dropped; fail rather than wait forever
+        if not (tryWrite msg) then
+            tcs.TrySetException(ObjectDisposedException(nameof TaskMailboxProcessor))
+            |> ignore
+
         tcs.Task
 
     /// <summary>Waits for the next message in arrival order.</summary>

@@ -69,7 +69,7 @@ let rec loop () =
 | `PostAndAsyncReply`/`PostAndTryAsyncReply` | Hot: posts at the call; running the `Async` again returns a cached reply or throws `ObjectDisposedException` | Cold: posts when run; each run is a new request; a `buildMessage` exception surfaces when run; a `Post` between creating and running arrives first |
 | Already-cancelled caller token on the async reply variants | Posted, then cancelled | Not posted, throws `OperationCanceledException` |
 | A reply timeout below `-1` | Posted, then throws | Throws before posting |
-| A request after `Dispose`, without `isThrowExceptionAfterDisposed` | Dropped; the caller waits for its timeout (forever if infinite) | Throws `ObjectDisposedException` |
+| A request after `Dispose`, without `isThrowExceptionAfterDisposed` | Dropped; the caller waits for its timeout (forever if infinite) | Throws `ObjectDisposedException`, even if `Dispose` races the request |
 
 A `TaskReplyChannel<'Reply>` you construct yourself is a pass-through: it calls its function on every `Reply`. Reply-once belongs to the request, not the channel.
 
