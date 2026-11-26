@@ -154,51 +154,97 @@ type TaskMailboxProcessor<'Msg>
                 exitReader ()
         }
 
-    // Covers only the infinite / negative-timeout path; 0 and finite timeouts are a later task
+    let scanSkipped (scanner: 'Msg -> CancellableTask<'T> option) =
+        let mutable found = ValueNone
+        let mutable i = 0
+
+        while found.IsNone
+              && i < skipped.Count do
+            match scanner skipped[i] with
+            | Some computation ->
+                skipped.RemoveAt i
+
+                Interlocked.Decrement(&queueLength)
+                |> ignore
+
+                found <- ValueSome computation
+            | None -> i <- i + 1
+
+        found
+
+    // A disposed mailbox never yields a message; clears skipped too
+    let scanArrivals (scanner: 'Msg -> CancellableTask<'T> option) =
+        if isDisposed () then
+            skipped.Clear()
+            ValueNone
+        else
+            let mutable found = ValueNone
+            let mutable keepGoing = true
+
+            while found.IsNone
+                  && keepGoing do
+                match tryReadArrival () with
+                | true, msg ->
+                    match scanner msg with
+                    | Some computation ->
+                        Interlocked.Decrement(&queueLength)
+                        |> ignore
+
+                        found <- ValueSome computation
+                    | None -> skipped.Add msg
+                | false, _ -> keepGoing <- false
+
+            found
+
+    let waitForMatch (scanner: 'Msg -> CancellableTask<'T> option) (ct: CancellationToken) =
+        task {
+            let mutable found = scanArrivals scanner
+
+            while found.IsNone do
+                do! (waitForArrival ct).ConfigureAwait(false)
+                found <- scanArrivals scanner
+
+            return found.Value
+        }
+
     let tryScan
         (scanner: 'Msg -> CancellableTask<'T> option)
-        (_timeout: int)
+        (timeout: int)
         : CancellableTask<'T voption> =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
             enterReader ()
-            let mutable found = ValueNone
 
-            try
-                if isDisposed () then
-                    skipped.Clear()
-                else
-                    let mutable i = 0
+            if isDisposed () then
+                skipped.Clear()
 
-                    while found.IsNone
-                          && i < skipped.Count do
-                        match scanner skipped[i] with
-                        | Some computation ->
-                            skipped.RemoveAt i
+            let! found =
+                cancellableTask {
+                    try
+                        match scanSkipped scanner with
+                        | ValueSome _ as found -> return found
+                        | ValueNone ->
+                            match scanArrivals scanner with
+                            | ValueSome _ as found -> return found
+                            | ValueNone when timeout = 0 -> return ValueNone
+                            // As FSharp.Core's scanNoTimeout: any negative timeout waits indefinitely, even with a token
+                            | ValueNone when timeout < 0 ->
+                                let! found = waitForMatch scanner ct
+                                return ValueSome found
+                            | ValueNone ->
+                                use timeoutCts = CancellationTokenSource.CreateLinkedTokenSource ct
+                                timeoutCts.CancelAfter timeout
 
-                            Interlocked.Decrement(&queueLength)
-                            |> ignore
-
-                            found <- ValueSome computation
-                        | None -> i <- i + 1
-
-                while found.IsNone do
-                    if isDisposed () then
-                        skipped.Clear()
-                        do! waitForArrival ct
-                    else
-                        match tryReadArrival () with
-                        | true, msg ->
-                            match scanner msg with
-                            | Some computation ->
-                                Interlocked.Decrement(&queueLength)
-                                |> ignore
-
-                                found <- ValueSome computation
-                            | None -> skipped.Add msg
-                        | false, _ -> do! waitForArrival ct
-            finally
-                exitReader ()
+                                try
+                                    let! found = waitForMatch scanner timeoutCts.Token
+                                    return ValueSome found
+                                with :? OperationCanceledException when
+                                    timeoutCts.IsCancellationRequested
+                                    && not ct.IsCancellationRequested ->
+                                    return ValueNone
+                    finally
+                        exitReader ()
+                }
 
             match found with
             | ValueSome computation ->
@@ -312,7 +358,7 @@ type TaskMailboxProcessor<'Msg>
     /// <summary>Waits for a message the scanner accepts, offering skipped messages before arrivals.
     /// A rejected message stays skipped for the next reader.</summary>
     /// <param name="scanner">Returns the computation to run for an accepted message, or <c>None</c> to skip it and keep waiting.</param>
-    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
+    /// <param name="timeout">Bounds the search, not the computation. Defaults to <c>DefaultTimeout</c>. <c>0</c> checks once; negative waits indefinitely.</param>
     /// <returns>A CancellableTask that takes the matched message's result when run.</returns>
     /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the token is cancelled.</exception>
@@ -330,7 +376,7 @@ type TaskMailboxProcessor<'Msg>
 
     /// <summary>Like <c>Scan</c>, but returns <c>None</c> when the timeout elapses.</summary>
     /// <param name="scanner">Returns the computation to run for an accepted message, or <c>None</c> to skip it and keep waiting.</param>
-    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
+    /// <param name="timeout">Bounds the search, not the computation. Defaults to <c>DefaultTimeout</c>. <c>0</c> checks once; negative waits indefinitely.</param>
     /// <returns>A CancellableTask that takes the matched message's result when run, or <c>None</c> on timeout.</returns>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the token is cancelled.</exception>
     /// <exception cref='T:System.InvalidOperationException'>Thrown when another Receive or Scan is waiting.</exception>
