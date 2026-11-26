@@ -5,7 +5,7 @@
 A task-native [MailboxProcessor](https://fsharp.github.io/fsharp-core-docs/reference/fsharp-control-fsharpmailboxprocessor-1.html). The body is an [IcedTasks](https://github.com/TheAngryByrd/IcedTasks) `CancellableTask` instead of an `Async`, and messages queue in a [System.Threading.Channels](https://learn.microsoft.com/en-us/dotnet/core/extensions/channels) channel.
 
 - `TaskMailboxProcessor<'Msg>` - Same shape and semantics as FSharp.Core's `MailboxProcessor<'Msg>`.
-    - `Post`, `Receive`, `TryReceive`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, `Dispose`
+    - `Post`, `Receive`, `TryReceive`, `Scan`, `TryScan`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, `Dispose`
 - `mailbox` - A `cancellableTask` whose `return!` is a tail call, so a recursive agent loop runs in constant stack and memory.
 
 ## Why should I use this?
@@ -41,6 +41,26 @@ counter.Post Increment
 ```
 
 Write recursive loops with `mailbox`, not `cancellableTask`: a task's `return!` is not a tail call, so each message would grow the stack and keep memory.
+
+`Scan` waits for a message a scanner matches, leaving messages it skips queued for later:
+
+```fsharp
+type Message =
+    | Work of int
+    | Stop
+
+let worker =
+    TaskMailboxProcessor.Start(fun inbox ->
+        mailbox {
+            do! inbox.Scan(function
+                | Stop -> Some(cancellableTask { return () })
+                | _ -> None)
+        }
+    )
+
+worker.Post(Work 1)
+worker.Post Stop
+```
 
 See [Compatibility with MailboxProcessor](docsSrc/Explanations/Compatibility.md) for where behavior differs.
 
