@@ -49,3 +49,4 @@ let rec loop () =
 | A second `Receive` while one waits | Undefined | Throws `InvalidOperationException` |
 | Exception from an `Error` handler | Thrown from `StartImmediate` | Faults the agent's internal task |
 | `Receive` | Hot `Async` | Cold `CancellableTask`; nothing is taken until it runs |
+| Caller's token on an infinite `Receive`, agent created without a token | Ignored | Throws `OperationCanceledException` |
