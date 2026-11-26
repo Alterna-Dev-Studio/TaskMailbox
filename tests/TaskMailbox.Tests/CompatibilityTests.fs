@@ -533,6 +533,31 @@ module CompatibilityTests =
                 }
             )
 
+    type SlowCounterMsg =
+        | SlowBump of int
+        | SlowZero
+        | SlowGet of Replier<int>
+
+    /// Like `getReplyCounter`, but each message is delayed 100ms before being applied, so a short
+    /// timeout can race the queue (MailboxProcessorType.fs `DefaultTimeout`).
+    let getSlowCounter (mailboxes: IMailboxes) =
+        Mailboxes.create
+            mailboxes
+            (fun inbox ->
+                cancellableTask {
+                    let mutable n = 0
+
+                    while true do
+                        let! msg = inbox.Receive()
+                        do! Task.Delay 100
+
+                        match msg with
+                        | SlowBump m -> n <- n + m
+                        | SlowZero -> n <- 0
+                        | SlowGet reply -> reply.Reply n
+                }
+            )
+
     /// Like `compute`, for `CounterMsg`.
     let rec computeCounter (mb: IMailbox<CounterMsg>) n =
         async {
@@ -759,6 +784,242 @@ module CompatibilityTests =
                             "Should reply"
 
                     Expect.equal reply (Array.sum computations) "Should sum every Bump"
+                }
+
+            testCaseTask "c32398u7 - PostAndReply returns the echo agent's reply"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    while true do
+                                        let! (r: Replier<int>) = inbox.Receive()
+                                        r.Reply 100
+                                }
+                            )
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.PostAndReply id))
+                            "Should reply"
+
+                    Expect.equal reply 100 "Should get the echoed reply"
+                }
+
+            testCaseTask "c32398u8 - two sequential PostAndReply calls each get their own reply"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    let! (r1: Replier<int>) = inbox.Receive()
+                                    r1.Reply 100
+                                    let! (r2: Replier<int>) = inbox.Receive()
+                                    r2.Reply 200
+                                }
+                            )
+
+                    let! reply1 =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.PostAndReply id))
+                            "Should reply 100"
+
+                    let! reply2 =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.PostAndReply id))
+                            "Should reply 200"
+
+                    Expect.equal (reply1, reply2) (100, 200) "Should get each reply in order"
+                }
+
+            testCaseTask
+                "c32398u9 - a TryReceive-driven agent replies to sequential PostAndReply calls"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.start
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    match! inbox.TryReceive() with
+                                    | Some(r1: Replier<int>) ->
+                                        r1.Reply 100
+
+                                        match! inbox.TryReceive() with
+                                        | Some(r2: Replier<int>) -> r2.Reply 200
+                                        | None -> failwith "Should receive"
+                                    | None -> failwith "Should receive"
+                                }
+                            )
+
+                    let! reply1 =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.PostAndReply id))
+                            "Should reply 100"
+
+                    let! reply2 =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.PostAndReply id))
+                            "Should reply 200"
+
+                    Expect.equal (reply1, reply2) (100, 200) "Should get each reply in order"
+                }
+
+            testCaseTask "TryPostAndReply races with DefaultTimeout against a slow queue"
+            <| fun () ->
+                task {
+                    use mb = getSlowCounter mailboxes
+                    mb.Start()
+                    mb.Post SlowZero
+                    mb.Post(SlowBump 1)
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.TryPostAndReply SlowGet))
+                            "Should reply"
+
+                    Expect.equal reply (Some 1) "Should reply once the queued messages are applied"
+
+                    mb.DefaultTimeout <- 10
+                    mb.Post SlowZero
+                    mb.Post(SlowBump 1)
+
+                    let! reply2 =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.TryPostAndReply SlowGet))
+                            "Should return None"
+
+                    Expect.equal
+                        reply2
+                        None
+                        "Should time out while the queued messages are still being applied"
+                }
+
+            testCaseTask "test6b - PostAndReply after posts returns the expected total"
+            <| fun () ->
+                task {
+                    use mb = getReplyCounter mailboxes
+                    mb.Post Zero
+
+                    let! computations =
+                        Async.Parallel(List.map (computeCounter mb) [ 1..50 ])
+                        |> Async.StartAsTask
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.PostAndReply Get))
+                            "Should reply"
+
+                    Expect.equal reply (Array.sum computations) "Should sum every Bump"
+                }
+
+            testCaseTask "test6c - TryPostAndReply after posts returns the expected total"
+            <| fun () ->
+                task {
+                    use mb = getReplyCounter mailboxes
+                    mb.Post Zero
+
+                    let! computations =
+                        Async.Parallel(List.map (computeCounter mb) [ 1..50 ])
+                        |> Async.StartAsTask
+
+                    let! reply =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () -> mb.TryPostAndReply Get))
+                            "Should reply"
+
+                    Expect.equal reply (Some(Array.sum computations)) "Should sum every Bump"
+                }
+
+            testCaseTask "PostAndReply's buildMessage exception propagates and posts nothing"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.create
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    let! (_: Replier<int>) = inbox.Receive()
+                                    ()
+                                }
+                            )
+
+                    let boom = Exception "boom"
+
+                    let! thrown =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () ->
+                                try
+                                    mb.PostAndReply(fun (_: Replier<int>) -> raise boom)
+                                    |> ignore
+
+                                    None
+                                with e ->
+                                    Some e
+                            ))
+                            "Should run"
+
+                    match thrown with
+                    | Some e ->
+                        Expect.isTrue
+                            (obj.ReferenceEquals(e, boom))
+                            $"Should be buildMessage's own exception, was {e}"
+                    | None -> failtest "Should propagate buildMessage's exception"
+
+                    Expect.equal mb.CurrentQueueLength 0 "Should not post anything"
+                }
+
+            testCaseTask "TryPostAndReply's buildMessage exception propagates and posts nothing"
+            <| fun () ->
+                task {
+                    use mb =
+                        Mailboxes.create
+                            mailboxes
+                            (fun inbox ->
+                                cancellableTask {
+                                    let! (_: Replier<int>) = inbox.Receive()
+                                    ()
+                                }
+                            )
+
+                    let boom = Exception "boom"
+
+                    let! thrown =
+                        Expect.completesWithin
+                            waitTime
+                            (Task.Run(fun () ->
+                                try
+                                    mb.TryPostAndReply(fun (_: Replier<int>) -> raise boom)
+                                    |> ignore
+
+                                    None
+                                with e ->
+                                    Some e
+                            ))
+                            "Should run"
+
+                    match thrown with
+                    | Some e ->
+                        Expect.isTrue
+                            (obj.ReferenceEquals(e, boom))
+                            $"Should be buildMessage's own exception, was {e}"
+                    | None -> failtest "Should propagate buildMessage's exception"
+
+                    Expect.equal mb.CurrentQueueLength 0 "Should not post anything"
                 }
         ]
 

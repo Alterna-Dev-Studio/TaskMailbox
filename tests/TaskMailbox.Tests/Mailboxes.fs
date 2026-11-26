@@ -40,6 +40,9 @@ type IMailbox<'Msg> =
     abstract PostAndTryAsyncReply:
         buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> CancellableTask<'R option>
 
+    abstract PostAndReply: buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> 'R
+    abstract TryPostAndReply: buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> 'R option
+
 /// Creates mailboxes of one implementation so a scenario can run against each.
 type IMailboxes =
     abstract Name: string
@@ -154,6 +157,12 @@ module Mailboxes =
                             )
 
                         fun ct -> Async.StartImmediateAsTask(a, ct)
+
+                    member _.PostAndReply(build, ?timeout) =
+                        mb.PostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
+
+                    member _.TryPostAndReply(build, ?timeout) =
+                        mb.TryPostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
                 }
         }
 
@@ -206,6 +215,12 @@ module Mailboxes =
                             (fun ch -> build (Replier ch.Reply)),
                             ?timeout = timeout
                         )
+
+                    member _.PostAndReply(build, ?timeout) =
+                        mb.PostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
+
+                    member _.TryPostAndReply(build, ?timeout) =
+                        mb.TryPostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
                 }
         }
 

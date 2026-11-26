@@ -479,6 +479,32 @@ type TaskMailboxProcessor<'Msg>
                 return raise (TimeoutException("TaskMailboxProcessor.PostAndAsyncReply timed out."))
         }
 
+    /// <summary>Like <c>PostAndReply</c>, but returns <c>None</c> instead of throwing when the
+    /// timeout elapses.</summary>
+    /// <remarks>Blocks the calling thread until the reply arrives or the timeout elapses. Calling
+    /// it from the agent's own body deadlocks, as FSharp.Core.</remarks>
+    /// <param name="buildMessage">Builds the message to post, given the reply channel.</param>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>.</param>
+    /// <returns>The reply, or <c>None</c> on timeout.</returns>
+    member x.TryPostAndReply
+        (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
+        : 'Reply option =
+        let timeout = defaultArg timeout defaultTimeout
+        let reply = x.PostRequest buildMessage
+
+        if reply.Wait timeout then Some reply.Result else None
+
+    /// <summary>Posts a request and blocks the calling thread until its reply arrives.</summary>
+    /// <remarks>Calling it from the agent's own body deadlocks, as FSharp.Core.</remarks>
+    /// <param name="buildMessage">Builds the message to post, given the reply channel.</param>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>.</param>
+    /// <returns>The reply.</returns>
+    /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
+    member x.PostAndReply(buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int) : 'Reply =
+        match x.TryPostAndReply(buildMessage, ?timeout = timeout) with
+        | Some r -> r
+        | None -> raise (TimeoutException("TaskMailboxProcessor.PostAndReply timed out."))
+
     /// <summary>Disposes the agent and drops its queued messages. The body is not cancelled.</summary>
     member x.Dispose() = (x :> IDisposable).Dispose()
 
