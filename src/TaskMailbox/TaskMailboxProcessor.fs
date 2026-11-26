@@ -323,13 +323,19 @@ type TaskMailboxProcessor<'Msg>
         Task.Run<unit>(fun () -> run cancellationToken)
         |> ignore
 
-    /// <summary>Starts the agent on the current thread, running the body until its first suspension.</summary>
+    /// <summary>Starts the agent on the current thread, running the body until its first suspension,
+    /// then on the thread pool. Never resumes the body on the caller's <c>SynchronizationContext</c>.</summary>
     /// <exception cref='T:System.InvalidOperationException'>Thrown when the agent has already been started.</exception>
     member x.StartImmediate() =
         let run = x.PrepareToStart()
+        let context = SynchronizationContext.Current
+        SynchronizationContext.SetSynchronizationContext null
 
-        run cancellationToken
-        |> ignore
+        try
+            run cancellationToken
+            |> ignore
+        finally
+            SynchronizationContext.SetSynchronizationContext context
 
     /// <summary>Posts a message to the agent. Messages posted after <c>Dispose</c> are dropped.</summary>
     /// <param name="message">The message to post.</param>

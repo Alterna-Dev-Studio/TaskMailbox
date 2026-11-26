@@ -26,6 +26,33 @@ module CompatibilityTests =
 
     let waitTime = 5000
 
+    /// Starts an echo agent directly on each implementation, bypassing the IInbox/CancellableTask
+    /// bridging: a bridged body's own await would capture the ambient SynchronizationContext itself,
+    /// so testing that behaviour needs each implementation's genuine Async/CancellableTask body.
+    let startEchoImmediate (mailboxes: IMailboxes) : IDisposable * (int -> int option) =
+        if obj.ReferenceEquals(mailboxes, Mailboxes.fsharpCore) then
+            let mb =
+                MailboxProcessor<AsyncReplyChannel<int>>.StartImmediate(fun inbox ->
+                    async {
+                        while true do
+                            let! r = inbox.Receive()
+                            r.Reply 100
+                    }
+                )
+
+            (mb :> IDisposable), (fun timeout -> mb.TryPostAndReply(id, timeout))
+        else
+            let mb =
+                TaskMailboxProcessor<TaskReplyChannel<int>>.StartImmediate(fun inbox ->
+                    cancellableTask {
+                        while true do
+                            let! (r: TaskReplyChannel<int>) = inbox.Receive()
+                            r.Reply 100
+                    }
+                )
+
+            (mb :> IDisposable), (fun timeout -> mb.TryPostAndReply(id, timeout))
+
     /// A scanner that never matches, typed by use site.
     let neverMatches (_: 'Msg) : CancellableTask<'T> option = None
 
@@ -2739,6 +2766,49 @@ module CompatibilityTests =
 
                     mb.StartImmediate()
                     Expect.isFalse ran "Should not run"
+
+                testCaseTask
+                    "StartImmediate does not resume the body on the caller's SynchronizationContext"
+                <| fun () ->
+                    task {
+                        let result = tcs<int option * int option * int> ()
+
+                        let th =
+                            Thread(fun () ->
+                                try
+                                    let ctx = SingleThreadContext()
+                                    SynchronizationContext.SetSynchronizationContext ctx
+
+                                    let mb, tryPostAndReply = startEchoImmediate mailboxes
+                                    use _ = mb
+
+                                    let reply1 = tryPostAndReply 2000
+                                    let reply2 = tryPostAndReply 2000
+
+                                    result.SetResult(reply1, reply2, ctx.Posts)
+                                with e ->
+                                    result.SetException e
+                            )
+
+                        th.IsBackground <- true
+                        th.Start()
+
+                        let! (reply1, reply2, posts) =
+                            Expect.completesWithin
+                                waitTime
+                                result.Task
+                                "Blocking TryPostAndReply should complete"
+
+                        th.Join()
+
+                        Expect.equal reply1 (Some 100) "Should get the first echoed reply"
+                        Expect.equal reply2 (Some 100) "Should get the second echoed reply"
+
+                        Expect.equal
+                            posts
+                            0
+                            "Body should never resume on the caller's SynchronizationContext"
+                    }
             ]
 
             testList "CurrentQueueLength" [

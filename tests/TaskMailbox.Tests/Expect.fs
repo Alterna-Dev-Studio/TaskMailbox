@@ -1,10 +1,41 @@
 namespace TaskMailbox.Tests
 
 open System
+open System.Collections.Concurrent
 open System.Threading
 open System.Threading.Tasks
 
 module TestHelpers =
+
+    /// A SynchronizationContext whose Post enqueues to a queue a test thread pumps with RunOne.
+    type SingleThreadContext() =
+        inherit SynchronizationContext()
+
+        let queue = new BlockingCollection<SendOrPostCallback * obj>()
+
+        let mutable posts = 0
+
+        /// The number of callbacks posted to this context.
+        member _.Posts = Volatile.Read(&posts)
+
+        /// Pumps one queued callback, waiting up to `timeout` ms. Returns whether one ran.
+        member _.RunOne(timeout: int) =
+            let mutable item = Unchecked.defaultof<SendOrPostCallback * obj>
+
+            if queue.TryTake(&item, timeout) then
+                let (d, s) = item
+                d.Invoke s
+                true
+            else
+                false
+
+        override _.Post(d, s) =
+            Interlocked.Increment(&posts)
+            |> ignore
+
+            queue.Add((d, s))
+
+        override this.CreateCopy() = this
 
     let makeDisposable (callback) =
         { new IDisposable with
