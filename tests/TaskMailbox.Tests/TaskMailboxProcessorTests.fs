@@ -113,11 +113,23 @@ module TaskMailboxProcessorTests =
 
                         do!
                             Expect.throwsTaskT<InvalidOperationException>
-                                (fun () -> mb.Receive () CancellationToken.None :> Task)
+                                (fun () ->
+                                    Expect.completesWithin
+                                        waitTime
+                                        (mb.Receive () CancellationToken.None)
+                                        "Should allow one reader"
+                                    :> Task
+                                )
                                 "Should allow one reader"
 
                         mb.Post 1
-                        let! msg = first
+
+                        let! msg =
+                            Expect.completesWithin
+                                waitTime
+                                first
+                                "First Receive should still receive"
+
                         Expect.equal msg 1 "First Receive should still receive"
                     }
 
@@ -129,11 +141,23 @@ module TaskMailboxProcessorTests =
 
                         do!
                             Expect.throwsTaskT<InvalidOperationException>
-                                (fun () -> mb.Scan (neverMatches, 0) CancellationToken.None :> Task)
+                                (fun () ->
+                                    Expect.completesWithin
+                                        waitTime
+                                        (mb.Scan (neverMatches, 0) CancellationToken.None)
+                                        "Should allow one reader"
+                                    :> Task
+                                )
                                 "Should allow one reader"
 
                         mb.Post 1
-                        let! msg = first
+
+                        let! msg =
+                            Expect.completesWithin
+                                waitTime
+                                first
+                                "First Receive should still receive"
+
                         Expect.equal msg 1 "First Receive should still receive"
                     }
 
@@ -173,7 +197,13 @@ module TaskMailboxProcessorTests =
 
                         do!
                             Expect.throwsTaskT<InvalidOperationException>
-                                (fun () -> mb.Receive () CancellationToken.None :> Task)
+                                (fun () ->
+                                    Expect.completesWithin
+                                        waitTime
+                                        (mb.Receive () CancellationToken.None)
+                                        "Should allow one reader"
+                                    :> Task
+                                )
                                 "Should allow one reader"
 
                         mb.Post 5
@@ -189,7 +219,13 @@ module TaskMailboxProcessorTests =
 
                         do!
                             Expect.throwsTaskT<TimeoutException>
-                                (fun () -> mb.Scan (neverMatches, 0) CancellationToken.None :> Task)
+                                (fun () ->
+                                    Expect.completesWithin
+                                        waitTime
+                                        (mb.Scan (neverMatches, 0) CancellationToken.None)
+                                        "Should time out"
+                                    :> Task
+                                )
                                 "Should time out"
 
                         mb.Post 1

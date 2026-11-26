@@ -4,6 +4,7 @@ open System
 open System.Collections.Concurrent
 open System.Threading
 open System.Threading.Tasks
+open Expecto
 
 module TestHelpers =
 
@@ -65,7 +66,9 @@ module TestHelpers =
             if n < current then
                 failwith $"step {n} already happened"
 
-            SpinWait.SpinUntil(fun () -> n = current)
+            if not (SpinWait.SpinUntil((fun () -> n = current), 5000)) then
+                failtestf "step %d did not come" n
+
             current <- n + 1
 
 module Expect =

@@ -2,6 +2,7 @@ namespace TaskMailbox.Tests
 
 open System
 open System.Collections.Concurrent
+open System.Diagnostics
 open System.Threading
 open System.Threading.Tasks
 open Expecto
@@ -175,7 +176,13 @@ module CompatibilityTests =
 
             do!
                 Expect.throwsTaskT<OperationCanceledException>
-                    (fun () -> (receive inbox) callerCts.Token :> Task)
+                    (fun () ->
+                        Expect.completesWithin
+                            waitTime
+                            ((receive inbox) callerCts.Token)
+                            "Should cancel, not time out"
+                        :> Task
+                    )
                     "Should cancel, not time out"
         }
 
@@ -254,7 +261,13 @@ module CompatibilityTests =
 
             do!
                 Expect.throwsTaskT<OperationCanceledException>
-                    (fun () -> (receive inbox) callerCts.Token :> Task)
+                    (fun () ->
+                        Expect.completesWithin
+                            waitTime
+                            ((receive inbox) callerCts.Token)
+                            "Should cancel"
+                        :> Task
+                    )
                     "Should cancel"
 
             mb.Post 9
@@ -389,8 +402,8 @@ module CompatibilityTests =
                     (fun inbox ->
                         cancellableTask {
                             while true do
-                                receiveEv.WaitOne()
-                                |> ignore
+                                if not (receiveEv.WaitOne waitTime) then
+                                    failtestf "receiveEv was not set within %dms" waitTime
 
                                 let! _ = receive inbox
 
@@ -401,13 +414,12 @@ module CompatibilityTests =
 
             let isErrored = firstFrom mb.Error
             mb.Start()
+            let deadline = Stopwatch.StartNew()
 
             let post =
                 Task.Run(fun () ->
-                    while not cts.IsCancellationRequested do
-                        postEv.WaitOne()
-                        |> ignore
-
+                    while not cts.IsCancellationRequested
+                          && postEv.WaitOne waitTime do
                         mb.Post ignore
                 )
 
@@ -429,13 +441,17 @@ module CompatibilityTests =
                     if isErrored.IsCompleted then
                         raise
                         <| Exception("Mailbox should not fail!", isErrored.Result)
+                    elif deadline.Elapsed > TimeSpan.FromSeconds 120. then
+                        failtestf
+                            "Receive races with post did not finish within %A"
+                            deadline.Elapsed
 
             cts.Cancel()
 
             postEv.Set()
             |> ignore
 
-            do! post
+            do! post.WaitAsync(TimeSpan.FromMilliseconds(float waitTime))
         }
 
     let afterDispose (mailboxes: IMailboxes) isThrowExceptionAfterDisposed =
@@ -1939,10 +1955,16 @@ module CompatibilityTests =
                                          - 1 do
                                 mb.Post i
 
-                            SpinWait.SpinUntil(fun () ->
-                                Volatile.Read(&count.contents) = start
-                                                                 + batch
-                            )
+                            let reachedBatch =
+                                SpinWait.SpinUntil(
+                                    (fun () ->
+                                        Volatile.Read(&count.contents) = start
+                                                                         + batch
+                                    ),
+                                    waitTime
+                                )
+
+                            Expect.isTrue reachedBatch "Should process the batch"
 
                         postBatch 0
                         let before = GC.GetTotalMemory true
@@ -2187,12 +2209,20 @@ module CompatibilityTests =
                             mb.Post "Message!"
 
                         let mutable queueLength = mb.CurrentQueueLength
+                        let deadline = Stopwatch.StartNew()
 
-                        while Volatile.Read(&count.contents) > 0 do
+                        while Volatile.Read(&count.contents) > 0
+                              && deadline.Elapsed < TimeSpan.FromSeconds 30. do
                             let current = mb.CurrentQueueLength
                             Expect.isLessThanOrEqual current queueLength "Should only drain"
                             queueLength <- current
                             do! Task.Delay 10
+
+                        if Volatile.Read(&count.contents) > 0 then
+                            failtestf
+                                "Did not drain within %A, %d messages remaining"
+                                deadline.Elapsed
+                                (Volatile.Read(&count.contents))
 
                         Expect.equal mb.CurrentQueueLength 0 "Should drain to 0"
                     }
