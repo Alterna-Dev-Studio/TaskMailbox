@@ -185,7 +185,13 @@ type TaskMailboxProcessor<'Msg>
                   && keepGoing do
                 match tryReadArrival () with
                 | true, msg ->
-                    match scanner msg with
+                    match
+                        (try
+                            scanner msg
+                         with _ ->
+                             skipped.Add msg
+                             reraise ())
+                    with
                     | Some computation ->
                         Interlocked.Decrement(&queueLength)
                         |> ignore
@@ -213,14 +219,15 @@ type TaskMailboxProcessor<'Msg>
         : CancellableTask<'T voption> =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
-            enterReader ()
-
-            if isDisposed () then
-                skipped.Clear()
 
             let! found =
                 cancellableTask {
+                    enterReader ()
+
                     try
+                        if isDisposed () then
+                            skipped.Clear()
+
                         match scanSkipped scanner with
                         | ValueSome _ as found -> return found
                         | ValueNone ->

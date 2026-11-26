@@ -1791,6 +1791,100 @@ module CompatibilityTests =
                             (error :? TimeoutException)
                             $"Should be TimeoutException, was {error}"
                     }
+
+                testCaseTask "Dispose drops skipped messages"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+                        mb.Post 2
+
+                        let! none =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(neverMatches, 0)) CancellationToken.None)
+                                "Should try-scan"
+
+                        Expect.equal none None "Should skip both"
+
+                        mb.Dispose()
+
+                        Expect.equal inbox.CurrentQueueLength 0 "Should drop skipped messages"
+
+                        let! received =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.TryReceive (0) CancellationToken.None)
+                                "Should try-receive"
+
+                        Expect.equal received None "Should not receive after Dispose"
+
+                        let! scanned =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(matchesAll, 0)) CancellationToken.None)
+                                "Should try-scan"
+
+                        Expect.equal scanned None "Should not scan after Dispose"
+                    }
+
+                testCaseTask "A scanner exception leaves a skipped message queued"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+                        let boom = Exception "boom"
+
+                        mb.Post 1
+                        mb.Post 2
+
+                        let! none =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.TryScan(neverMatches, 0)) CancellationToken.None)
+                                "Should try-scan"
+
+                        Expect.equal none None "Should skip both"
+
+                        let! thrown =
+                            task {
+                                try
+                                    let! (_: int option) =
+                                        (inbox.TryScan((fun (_: int) -> raise boom), 0))
+                                            CancellationToken.None
+
+                                    return None
+                                with e ->
+                                    return Some e
+                            }
+
+                        match thrown with
+                        | Some e ->
+                            Expect.isTrue
+                                (obj.ReferenceEquals(e, boom))
+                                $"Should be the scanner's own exception, was {e}"
+                        | None -> failtest "Should propagate the scanner's exception"
+
+                        Expect.equal inbox.CurrentQueueLength 2 "Should keep both skipped messages"
+
+                        let! r1 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal r1 1 "Should receive skipped 1 first"
+
+                        let! r2 =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal r2 2 "Should receive skipped 2"
+                    }
             ]
 
             testList "TryScan" [
