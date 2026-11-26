@@ -2318,7 +2318,8 @@ module CompatibilityTests =
                                     }
                                 )
 
-                        mb.Start()
+                        mb.StartImmediate()
+                        Expect.isFalse received.Task.IsCompleted "Should be waiting"
                         mb.Post 7
 
                         let! received =
@@ -3563,6 +3564,27 @@ module CompatibilityTests =
             ]
 
             testList "Start" [
+                testCase "Cancelling the agent's token does not raise Error"
+                <| fun () ->
+                    use cts = new CancellationTokenSource()
+
+                    use mb =
+                        mailboxes.Create(
+                            (fun _ ->
+                                cancellableTask {
+                                    cts.Cancel()
+                                    let! ct = CancellableTask.getCancellationToken ()
+                                    ct.ThrowIfCancellationRequested()
+                                }
+                            ),
+                            false,
+                            cts.Token
+                        )
+
+                    let error = firstFrom mb.Error
+                    mb.StartImmediate()
+                    Expect.isFalse error.IsCompleted "Should not raise Error"
+
                 testCase "StartImmediate with a cancelled token does not run the body"
                 <| fun () ->
                     let mutable ran = false
@@ -3618,6 +3640,44 @@ module CompatibilityTests =
                             posts
                             0
                             "Body should never resume on the caller's SynchronizationContext"
+                    }
+
+                testCaseTask "Start does not run the body on the calling thread"
+                <| fun () ->
+                    task {
+                        let callingThreadInfo = tcs<ThreadInfo> ()
+                        let bodyThreadInfo = tcs<ThreadInfo> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        bodyThreadInfo.SetResult(getThreadInfo ())
+                                        let! (_: int) = inbox.Receive()
+                                        ()
+                                    }
+                                )
+
+                        let th =
+                            Thread(fun () ->
+                                callingThreadInfo.SetResult(getThreadInfo ())
+                                mb.Start()
+                            )
+
+                        th.IsBackground <- true
+                        th.Start()
+
+                        if not (th.Join waitTime) then
+                            failtestf "Thread did not finish within %dms" waitTime
+
+                        let! bodyThreadInfo =
+                            Expect.completesWithin waitTime bodyThreadInfo.Task "Body should run"
+
+                        Expect.notEqual
+                            bodyThreadInfo
+                            callingThreadInfo.Task.Result
+                            "Should not run on the calling thread"
                     }
             ]
 
