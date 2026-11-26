@@ -12,3 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Scan` and `TryScan` for selective receive
 - `mailbox { }` computation expression whose `return!` is a tail call, for recursive agent loops
 - Compatibility tests that run the same scenarios against FSharp.Core's `MailboxProcessor`
+- `TaskReplyChannel<'Reply>` and `PostAndReply`, `TryPostAndReply`, `PostAndAsyncReply`, `PostAndTryAsyncReply` for request/reply
+
+### Changed
+- `StartImmediate` no longer resumes the body on the caller's `SynchronizationContext`

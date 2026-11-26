@@ -6,6 +6,8 @@ A task-native [MailboxProcessor](https://fsharp.github.io/fsharp-core-docs/refer
 
 - `TaskMailboxProcessor<'Msg>` - Same shape and semantics as FSharp.Core's `MailboxProcessor<'Msg>`.
     - `Post`, `Receive`, `TryReceive`, `Scan`, `TryScan`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, `Dispose`
+    - `PostAndReply`, `TryPostAndReply`, `PostAndAsyncReply`, `PostAndTryAsyncReply`
+- `TaskReplyChannel<'Reply>` - The reply channel the `PostAnd*Reply` methods pass to `buildMessage`.
 - `mailbox` - A `cancellableTask` whose `return!` is a tail call, so a recursive agent loop runs in constant stack and memory.
 
 ## Why should I use this?
@@ -15,13 +17,13 @@ A task-native [MailboxProcessor](https://fsharp.github.io/fsharp-core-docs/refer
 - You already know `MailboxProcessor`.
 
 ```fsharp
-open System.Threading.Tasks
+open System.Threading
 open IcedTasks
 open TaskMailbox
 
 type Message =
     | Increment
-    | Get of TaskCompletionSource<int>
+    | Get of TaskReplyChannel<int>
 
 let counter =
     TaskMailboxProcessor.Start(fun inbox ->
@@ -30,7 +32,7 @@ let counter =
                 match! inbox.Receive() with
                 | Increment -> return! loop (count + 1)
                 | Get reply ->
-                    reply.SetResult count
+                    reply.Reply count
                     return! loop count
             }
 
@@ -38,6 +40,10 @@ let counter =
     )
 
 counter.Post Increment
+
+// Cold: posts the request when run
+let getCount = counter.PostAndAsyncReply Get
+let count = getCount CancellationToken.None
 ```
 
 Write recursive loops with `mailbox`, not `cancellableTask`: a task's `return!` is not a tail call, so each message would grow the stack and keep memory.
