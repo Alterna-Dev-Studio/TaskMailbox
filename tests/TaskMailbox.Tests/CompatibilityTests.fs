@@ -102,6 +102,174 @@ module CompatibilityTests =
             Expect.equal (result ()) (Some "Received 1 Disposed") "Should receive then dispose"
         }
 
+    /// A mailbox on `cts` whose body hands out its inbox, then idles.
+    let createIdleMailbox (mailboxes: IMailboxes) (cts: CancellationTokenSource) =
+        let inboxTcs = tcs<IInbox<int>> ()
+
+        let mb =
+            mailboxes.Create(
+                (fun inbox ->
+                    cancellableTask {
+                        inboxTcs.SetResult inbox
+                        let! ct = CancellableTask.getCancellationToken ()
+                        do! Task.Delay(Timeout.Infinite, ct)
+                    }
+                ),
+                false,
+                cts.Token
+            )
+
+        mb, inboxTcs.Task
+
+    let startAndGetInbox (mailboxes: IMailboxes) (cts: CancellationTokenSource) =
+        task {
+            let mb, inboxTask = createIdleMailbox mailboxes cts
+            mb.Start()
+            let! inbox = Expect.completesWithin waitTime inboxTask "Should hand out inbox"
+            return mb, inbox
+        }
+
+    let callerCancelWhileWaiting
+        (mailboxes: IMailboxes)
+        (receive: IInbox<int> -> CancellableTask<'a>)
+        =
+        task {
+            use cts = new CancellationTokenSource()
+            let! _, inbox = startAndGetInbox mailboxes cts
+            use callerCts = new CancellationTokenSource()
+            callerCts.CancelAfter 20
+
+            do!
+                Expect.throwsTaskT<OperationCanceledException>
+                    (fun () -> (receive inbox) callerCts.Token :> Task)
+                    "Should cancel, not time out"
+        }
+
+    let alreadyCancelledWithQueuedMessage
+        (mailboxes: IMailboxes)
+        (receive: IInbox<int> -> CancellableTask<'a>)
+        =
+        task {
+            use cts = new CancellationTokenSource()
+            let mb, inboxTask = createIdleMailbox mailboxes cts
+            mb.Post 7
+            mb.Start()
+            let! inbox = Expect.completesWithin waitTime inboxTask "Should hand out inbox"
+
+            do!
+                Expect.throwsTaskT<OperationCanceledException>
+                    (fun () -> (receive inbox) (CancellationToken(true)) :> Task)
+                    "Should cancel, not consume the message"
+
+            Expect.equal inbox.CurrentQueueLength 1 "Should not consume the queued message"
+
+            let! msg =
+                Expect.completesWithin
+                    waitTime
+                    (inbox.Receive () CancellationToken.None)
+                    "Should receive"
+
+            Expect.equal msg 7 "Should get the queued message"
+        }
+
+    let postAfterCallerCancelIsReceived
+        (mailboxes: IMailboxes)
+        (receive: IInbox<int> -> CancellableTask<'a>)
+        =
+        task {
+            use cts = new CancellationTokenSource()
+            let! mb, inbox = startAndGetInbox mailboxes cts
+            use callerCts = new CancellationTokenSource()
+            callerCts.CancelAfter 20
+
+            do!
+                Expect.throwsTaskT<OperationCanceledException>
+                    (fun () -> (receive inbox) callerCts.Token :> Task)
+                    "Should cancel"
+
+            mb.Post 9
+
+            let! msg =
+                Expect.completesWithin
+                    waitTime
+                    (inbox.Receive () CancellationToken.None)
+                    "Should receive"
+
+            Expect.equal msg 9 "Should receive the message posted after cancel"
+        }
+
+    let mailboxCancelDoesNotCancelUncancellableReceive
+        (mailboxes: IMailboxes)
+        (receive: IInbox<int> -> CancellableTask<'a>)
+        (unwrap: 'a -> int)
+        =
+        task {
+            use cts = new CancellationTokenSource()
+            let! mb, inbox = startAndGetInbox mailboxes cts
+            let receiveTask = (receive inbox) CancellationToken.None
+            do! Task.Delay 20
+            cts.Cancel()
+            mb.Post 5
+            let! result = Expect.completesWithin waitTime receiveTask "Should still receive"
+            Expect.equal (unwrap result) 5 "Should receive despite mailbox cancellation"
+        }
+
+    let receiveRacesNearTimeout (mailboxes: IMailboxes) =
+        task {
+            let n = 200
+            use cts = new CancellationTokenSource()
+            let! mb, inbox = startAndGetInbox mailboxes cts
+            let rnd = Random()
+
+            for i in 0 .. n - 1 do
+                let post =
+                    Task.Run(fun () ->
+                        Thread.Sleep(rnd.Next(0, 41))
+                        mb.Post i
+                    )
+
+                let! received =
+                    task {
+                        try
+                            return! inbox.Receive (20) CancellationToken.None
+                        with :? TimeoutException ->
+                            return! inbox.Receive (1000) CancellationToken.None
+                    }
+
+                do! post
+                Expect.equal received i $"Should receive message {i} exactly once"
+                Expect.equal inbox.CurrentQueueLength 0 "Should drain the queue"
+        }
+
+    let tryReceiveRacesNearTimeout (mailboxes: IMailboxes) =
+        task {
+            let n = 200
+            use cts = new CancellationTokenSource()
+            let! mb, inbox = startAndGetInbox mailboxes cts
+            let rnd = Random()
+
+            for i in 0 .. n - 1 do
+                let post =
+                    Task.Run(fun () ->
+                        Thread.Sleep(rnd.Next(0, 41))
+                        mb.Post i
+                    )
+
+                let! received =
+                    task {
+                        match! inbox.TryReceive (20) CancellationToken.None with
+                        | Some m -> return m
+                        | None ->
+                            match! inbox.TryReceive (1000) CancellationToken.None with
+                            | Some m -> return m
+                            | None -> return failwithf "Timed out waiting for message %d" i
+                    }
+
+                do! post
+                Expect.equal received i $"Should receive message {i} exactly once"
+                Expect.equal inbox.CurrentQueueLength 0 "Should drain the queue"
+        }
+
     let receiveRacesWithPost
         (mailboxes: IMailboxes)
         iterations
@@ -777,6 +945,240 @@ module CompatibilityTests =
                     }
             ]
 
+            testList "Negative timeout" [
+                testCaseTask "Receive(-2) without a token waits, like -1"
+                <| fun () ->
+                    task {
+                        let received = tcs<int> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.Receive(-2)
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Start()
+                        mb.Post 7
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received 7 "Should receive the posted message"
+                    }
+
+                testCaseTask "Receive(-2) without a token returns a queued message"
+                <| fun () ->
+                    task {
+                        let received = tcs<int> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.Receive(-2)
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Post 7
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received 7 "Should receive the queued message"
+                    }
+
+                testCaseTask
+                    "Receive(-2) with a token throws ArgumentOutOfRangeException when empty"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            mailboxes.Create(
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! (_: int) = inbox.Receive(-2)
+                                        ()
+                                    }
+                                ),
+                                false,
+                                cts.Token
+                            )
+
+                        let error = firstFrom mb.Error
+                        mb.Start()
+                        let! error = Expect.completesWithin waitTime error "Should raise Error"
+
+                        Expect.isTrue
+                            (error :? ArgumentOutOfRangeException)
+                            $"Should be ArgumentOutOfRangeException, was {error}"
+                    }
+
+                testCaseTask "Receive(-2) with a token returns a queued message"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let received = tcs<int> ()
+
+                        use mb =
+                            mailboxes.Create(
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.Receive(-2)
+                                        received.SetResult msg
+                                    }
+                                ),
+                                false,
+                                cts.Token
+                            )
+
+                        mb.Post 7
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received 7 "Should receive the queued message"
+                    }
+
+                testCaseTask
+                    "DefaultTimeout -5 with a token throws ArgumentOutOfRangeException when empty"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            mailboxes.Create(
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! (_: int) = inbox.Receive()
+                                        ()
+                                    }
+                                ),
+                                false,
+                                cts.Token
+                            )
+
+                        mb.DefaultTimeout <- -5
+                        let error = firstFrom mb.Error
+                        mb.Start()
+                        let! error = Expect.completesWithin waitTime error "Should raise Error"
+
+                        Expect.isTrue
+                            (error :? ArgumentOutOfRangeException)
+                            $"Should be ArgumentOutOfRangeException, was {error}"
+                    }
+
+                testCaseTask "TryReceive(-2) without a token waits, like -1"
+                <| fun () ->
+                    task {
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive(-2)
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Start()
+                        mb.Post 7
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received (Some 7) "Should receive the posted message"
+                    }
+
+                testCaseTask "TryReceive(-2) without a token returns a queued message"
+                <| fun () ->
+                    task {
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive(-2)
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Post 7
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received (Some 7) "Should receive the queued message"
+                    }
+
+                testCaseTask
+                    "TryReceive(-2) with a token throws ArgumentOutOfRangeException when empty"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            mailboxes.Create(
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! (_: int option) = inbox.TryReceive(-2)
+                                        ()
+                                    }
+                                ),
+                                false,
+                                cts.Token
+                            )
+
+                        let error = firstFrom mb.Error
+                        mb.Start()
+                        let! error = Expect.completesWithin waitTime error "Should raise Error"
+
+                        Expect.isTrue
+                            (error :? ArgumentOutOfRangeException)
+                            $"Should be ArgumentOutOfRangeException, was {error}"
+                    }
+
+                testCaseTask "TryReceive(-2) with a token returns a queued message"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            mailboxes.Create(
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive(-2)
+                                        received.SetResult msg
+                                    }
+                                ),
+                                false,
+                                cts.Token
+                            )
+
+                        mb.Post 7
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received (Some 7) "Should receive the queued message"
+                    }
+            ]
+
             testList "TryReceive" [
                 testCaseTask "Returns Some for a queued message"
                 <| fun () ->
@@ -943,6 +1345,73 @@ module CompatibilityTests =
 
                         Expect.equal received 7 "Should receive the later message"
                     }
+            ]
+
+            testList "Cancellation" [
+                testCaseTask "Receive is cancelled by the caller's token while waiting"
+                <| fun () ->
+                    callerCancelWhileWaiting mailboxes (fun inbox -> inbox.Receive(waitTime))
+
+                testCaseTask "TryReceive is cancelled by the caller's token while waiting"
+                <| fun () ->
+                    callerCancelWhileWaiting mailboxes (fun inbox -> inbox.TryReceive(waitTime))
+
+                testCaseTask "An already-cancelled Receive does not consume a queued message"
+                <| fun () ->
+                    alreadyCancelledWithQueuedMessage mailboxes (fun inbox -> inbox.Receive())
+
+                testCaseTask "An already-cancelled TryReceive does not consume a queued message"
+                <| fun () ->
+                    alreadyCancelledWithQueuedMessage mailboxes (fun inbox -> inbox.TryReceive())
+
+                testCaseTask "A message posted after a cancelled Receive is not lost"
+                <| fun () ->
+                    postAfterCallerCancelIsReceived mailboxes (fun inbox -> inbox.Receive(waitTime))
+
+                testCaseTask "A message posted after a cancelled TryReceive is not lost"
+                <| fun () ->
+                    postAfterCallerCancelIsReceived
+                        mailboxes
+                        (fun inbox -> inbox.TryReceive(waitTime))
+
+                testCaseTask "The agent's token does not cancel a Receive run on another token"
+                <| fun () ->
+                    mailboxCancelDoesNotCancelUncancellableReceive
+                        mailboxes
+                        (fun inbox -> inbox.Receive())
+                        id
+
+                testCaseTask "The agent's token does not cancel a TryReceive run on another token"
+                <| fun () ->
+                    mailboxCancelDoesNotCancelUncancellableReceive
+                        mailboxes
+                        (fun inbox -> inbox.TryReceive())
+                        (function
+                        | Some m -> m
+                        | None -> failwith "Should receive a message"
+                        )
+
+                testCaseTask "TryReceive handles cancellation token"
+                <| fun () ->
+                    receiveHandlesCancellation
+                        mailboxes
+                        (fun inbox ->
+                            cancellableTask {
+                                match! inbox.TryReceive() with
+                                | Some m -> return m
+                                | None -> return failwith "Should not time out"
+                            }
+                        )
+
+                testCaseTask
+                    "Receive races with Post near its timeout"
+                    (fun () -> receiveRacesNearTimeout mailboxes)
+                |> testSequenced
+
+                testCaseTask
+                    "TryReceive races with Post near its timeout"
+                    (fun () -> tryReceiveRacesNearTimeout mailboxes)
+                |> testSequenced
             ]
 
             testList "Start" [

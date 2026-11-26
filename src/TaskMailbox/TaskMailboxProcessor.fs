@@ -26,6 +26,7 @@ type TaskMailboxProcessor<'Msg>
         ?cancellationToken: CancellationToken
     ) =
 
+    let hasToken = cancellationToken.IsSome
     let cancellationToken = defaultArg cancellationToken CancellationToken.None
 
     let arrivals =
@@ -91,6 +92,19 @@ type TaskMailboxProcessor<'Msg>
                 match (if isDisposed () then ValueNone else tryRead ()) with
                 | ValueSome msg -> return ValueSome msg
                 | ValueNone when timeout = 0 -> return ValueNone
+                // As FSharp.Core, whose mailbox.fs `waitOne` hands the timeout to a wait handle when it has a token
+                | ValueNone when
+                    timeout < -1
+                    && hasToken
+                    ->
+                    return
+                        raise (
+                            ArgumentOutOfRangeException(
+                                nameof timeout,
+                                timeout,
+                                "Must be -1 or greater when the agent has a cancellation token."
+                            )
+                        )
                 | ValueNone when timeout < 0 ->
                     let! msg = readAsync ct
                     return ValueSome msg
@@ -182,6 +196,7 @@ type TaskMailboxProcessor<'Msg>
     /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
     /// <returns>A CancellableTask that takes the next message when run.</returns>
     /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
+    /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1 on an agent created with a token and the queue is empty.</exception>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the token is cancelled.</exception>
     /// <exception cref='T:System.InvalidOperationException'>Thrown when another Receive is waiting.</exception>
     member _.Receive(?timeout: int) : CancellableTask<'Msg> =
@@ -196,6 +211,7 @@ type TaskMailboxProcessor<'Msg>
     /// <summary>Like <c>Receive</c>, but returns <c>None</c> when the timeout elapses.</summary>
     /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
     /// <returns>A CancellableTask that takes the next message when run, or <c>None</c> on timeout.</returns>
+    /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1 on an agent created with a token and the queue is empty.</exception>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the token is cancelled.</exception>
     /// <exception cref='T:System.InvalidOperationException'>Thrown when another Receive is waiting.</exception>
     member _.TryReceive(?timeout: int) : CancellableTask<'Msg option> =
