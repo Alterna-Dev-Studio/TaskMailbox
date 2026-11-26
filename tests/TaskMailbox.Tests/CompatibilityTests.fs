@@ -1268,6 +1268,34 @@ module CompatibilityTests =
                                 }
                     ]
 
+                testList "The agent's token cancelling does not end a finite wait early" [
+                    for name, call in replyCalls ->
+                        testCaseTask name
+                        <| fun () ->
+                            task {
+                                use cts = new CancellationTokenSource()
+
+                                use mb =
+                                    mailboxes.Create(
+                                        (fun (_: IInbox<Replier<int>>) -> cancellableTask { () }),
+                                        false,
+                                        cts.Token
+                                    )
+
+                                mb.Start()
+                                let callTask = call mb 200
+                                cts.Cancel()
+
+                                let! result =
+                                    Expect.completesWithin waitTime callTask "Should complete"
+
+                                Expect.equal
+                                    result
+                                    None
+                                    "Should time out, not end early from the agent's token"
+                            }
+                ]
+
                 testList
                     "DefaultTimeout applies, as controlMailbox timeout_t?par_def/timeout_t?para_def"
                     [
@@ -1408,6 +1436,128 @@ module CompatibilityTests =
                                             "Should throw ArgumentOutOfRangeException"
                                 }
                     ]
+            ]
+
+            // Only the async variants take a caller token; PostAndReply/TryPostAndReply block
+            // the calling thread and have no cancellation parameter.
+            testList "Cancellation" [
+                let asyncCalls
+                    : (string * (IMailbox<Replier<int>> -> int -> CancellationToken -> Task<unit>)) list = [
+                    "PostAndTryAsyncReply",
+                    (fun mb timeout ct ->
+                        task {
+                            let! _ = (mb.PostAndTryAsyncReply(id, timeout)) ct
+                            ()
+                        }
+                    )
+
+                    "PostAndAsyncReply",
+                    (fun mb timeout ct ->
+                        task {
+                            let! _ = (mb.PostAndAsyncReply(id, timeout)) ct
+                            ()
+                        }
+                    )
+                ]
+
+                /// An agent that never receives, so no reply can race the cancellation.
+                let unresponsiveAgent withToken =
+                    if withToken then
+                        mailboxes.Create(
+                            (fun (_: IInbox<Replier<int>>) -> cancellableTask { () }),
+                            false,
+                            CancellationToken.None
+                        )
+                    else
+                        mailboxes.Create(
+                            (fun (_: IInbox<Replier<int>>) -> cancellableTask { () }),
+                            false
+                        )
+
+                let cancelWhileWaiting name withToken timeout =
+                    testList name [
+                        for callName, call in asyncCalls ->
+                            testCaseTask callName
+                            <| fun () ->
+                                task {
+                                    use mb = unresponsiveAgent withToken
+                                    mb.Start()
+                                    use cts = new CancellationTokenSource()
+                                    cts.CancelAfter 10
+
+                                    do!
+                                        Expect.throwsTaskT<OperationCanceledException>
+                                            (fun () ->
+                                                Expect.completesWithin
+                                                    waitTime
+                                                    (call mb timeout cts.Token)
+                                                    "Should cancel"
+                                                :> Task
+                                            )
+                                            "Should cancel"
+                                }
+                    ]
+
+                // Never the token-less, infinite-timeout case here: FSharp.Core's mailbox.fs
+                // `waitOne` ignores the caller's token on a token-less agent's infinite wait, so
+                // that combination would hang FSharp.Core instead of cancelling. It is covered as
+                // a TaskMailbox-only test instead (reusing `cancelsInfiniteWait`).
+                cancelWhileWaiting "Agent with a token, infinite timeout" true -1
+                cancelWhileWaiting "Agent with a token, finite timeout" true waitTime
+                cancelWhileWaiting "Token-less agent, finite timeout" false waitTime
+
+                testCaseTask
+                    "A late Reply after the caller cancels does not throw, and the next request still succeeds"
+                <| fun () ->
+                    task {
+                        let gate = tcs<unit> ()
+                        let replied = tcs<unit> ()
+
+                        use mb =
+                            Mailboxes.start
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! (r: Replier<int>) = inbox.Receive()
+                                        do! gate.Task
+                                        r.Reply 1
+                                        replied.SetResult()
+                                        let! (r2: Replier<int>) = inbox.Receive()
+                                        r2.Reply 2
+                                    }
+                                )
+
+                        use cts = new CancellationTokenSource()
+
+                        do!
+                            Expect.throwsTaskT<OperationCanceledException>
+                                (fun () ->
+                                    task {
+                                        let op = (mb.PostAndAsyncReply(id, waitTime)) cts.Token
+                                        cts.Cancel()
+                                        let! _ = Expect.completesWithin waitTime op "Should cancel"
+                                        ()
+                                    }
+                                    :> Task
+                                )
+                                "Should cancel"
+
+                        gate.SetResult()
+
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                replied.Task
+                                "The late Reply should not throw"
+
+                        let! second =
+                            Expect.completesWithin
+                                waitTime
+                                ((mb.PostAndAsyncReply id) CancellationToken.None)
+                                "The next request should still succeed"
+
+                        Expect.equal second 2 "Should get the next reply"
+                    }
             ]
         ]
 
