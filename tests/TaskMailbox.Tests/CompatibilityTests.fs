@@ -29,6 +29,9 @@ module CompatibilityTests =
     /// A scanner that never matches, typed by use site.
     let neverMatches (_: 'Msg) : CancellableTask<'T> option = None
 
+    /// A scanner that matches every message, so "received" means scanned.
+    let matchesAll (m: 'Msg) : CancellableTask<'Msg> option = Some(cancellableTask { return m })
+
     let getSimpleMailbox (mailboxes: IMailboxes) =
         Mailboxes.create
             mailboxes
@@ -166,6 +169,42 @@ module CompatibilityTests =
                     "Should cancel, not consume the message"
 
             Expect.equal inbox.CurrentQueueLength 1 "Should not consume the queued message"
+
+            let! msg =
+                Expect.completesWithin
+                    waitTime
+                    (inbox.Receive () CancellationToken.None)
+                    "Should receive"
+
+            Expect.equal msg 7 "Should get the queued message"
+        }
+
+    /// Like `alreadyCancelledWithQueuedMessage`, but also asserts the scanner is never called.
+    let alreadyCancelledScan
+        (mailboxes: IMailboxes)
+        (scan: IInbox<int> -> (int -> CancellableTask<int> option) -> CancellationToken -> Task<'a>)
+        =
+        task {
+            use cts = new CancellationTokenSource()
+            let mb, inboxTask = createIdleMailbox mailboxes cts
+            mb.Post 7
+            mb.Start()
+            let! inbox = Expect.completesWithin waitTime inboxTask "Should hand out inbox"
+            let mutable scannerCalls = 0
+
+            let scanner m =
+                Interlocked.Increment(&scannerCalls)
+                |> ignore
+
+                matchesAll m
+
+            do!
+                Expect.throwsTaskT<OperationCanceledException>
+                    (fun () -> (scan inbox scanner) (CancellationToken(true)) :> Task)
+                    "Should cancel, not consume the message"
+
+            Expect.equal inbox.CurrentQueueLength 1 "Should not consume the queued message"
+            Expect.equal scannerCalls 0 "Should not call the scanner"
 
             let! msg =
                 Expect.completesWithin
@@ -1978,6 +2017,14 @@ module CompatibilityTests =
                 <| fun () ->
                     callerCancelWhileWaiting mailboxes (fun inbox -> inbox.TryReceive(waitTime))
 
+                testCaseTask "Scan is cancelled by the caller's token while waiting"
+                <| fun () ->
+                    callerCancelWhileWaiting mailboxes (fun inbox -> inbox.Scan(matchesAll))
+
+                testCaseTask "TryScan is cancelled by the caller's token while waiting"
+                <| fun () ->
+                    callerCancelWhileWaiting mailboxes (fun inbox -> inbox.TryScan(matchesAll))
+
                 testCaseTask "An already-cancelled Receive does not consume a queued message"
                 <| fun () ->
                     alreadyCancelledWithQueuedMessage mailboxes (fun inbox -> inbox.Receive())
@@ -1985,6 +2032,16 @@ module CompatibilityTests =
                 testCaseTask "An already-cancelled TryReceive does not consume a queued message"
                 <| fun () ->
                     alreadyCancelledWithQueuedMessage mailboxes (fun inbox -> inbox.TryReceive())
+
+                testCaseTask
+                    "An already-cancelled Scan does not consume a queued message or call the scanner"
+                <| fun () ->
+                    alreadyCancelledScan mailboxes (fun inbox scanner -> inbox.Scan(scanner))
+
+                testCaseTask
+                    "An already-cancelled TryScan does not consume a queued message or call the scanner"
+                <| fun () ->
+                    alreadyCancelledScan mailboxes (fun inbox scanner -> inbox.TryScan(scanner))
 
                 testCaseTask "A message posted after a cancelled Receive is not lost"
                 <| fun () ->
@@ -1995,6 +2052,16 @@ module CompatibilityTests =
                     postAfterCallerCancelIsReceived
                         mailboxes
                         (fun inbox -> inbox.TryReceive(waitTime))
+
+                testCaseTask "A message posted after a cancelled Scan is not lost"
+                <| fun () ->
+                    postAfterCallerCancelIsReceived mailboxes (fun inbox -> inbox.Scan(matchesAll))
+
+                testCaseTask "A message posted after a cancelled TryScan is not lost"
+                <| fun () ->
+                    postAfterCallerCancelIsReceived
+                        mailboxes
+                        (fun inbox -> inbox.TryScan(matchesAll))
 
                 testCaseTask "The agent's token does not cancel a Receive run on another token"
                 <| fun () ->
@@ -2008,6 +2075,23 @@ module CompatibilityTests =
                     mailboxCancelDoesNotCancelUncancellableReceive
                         mailboxes
                         (fun inbox -> inbox.TryReceive())
+                        (function
+                        | Some m -> m
+                        | None -> failwith "Should receive a message"
+                        )
+
+                testCaseTask "The agent's token does not cancel a Scan run on another token"
+                <| fun () ->
+                    mailboxCancelDoesNotCancelUncancellableReceive
+                        mailboxes
+                        (fun inbox -> inbox.Scan(matchesAll))
+                        id
+
+                testCaseTask "The agent's token does not cancel a TryScan run on another token"
+                <| fun () ->
+                    mailboxCancelDoesNotCancelUncancellableReceive
+                        mailboxes
+                        (fun inbox -> inbox.TryScan(matchesAll))
                         (function
                         | Some m -> m
                         | None -> failwith "Should receive a message"
