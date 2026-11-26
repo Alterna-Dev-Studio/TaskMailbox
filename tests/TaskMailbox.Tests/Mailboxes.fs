@@ -19,6 +19,11 @@ type IInbox<'Msg> =
 
     abstract CurrentQueueLength: int
 
+/// A test-only reply channel: `AsyncReplyChannel` can't be constructed directly, so messages in
+/// compatibility tests carry a `Replier` instead, built from either implementation's own channel.
+type Replier<'T>(reply: 'T -> unit) =
+    member _.Reply(value: 'T) = reply value
+
 /// The owning side of a mailbox.
 type IMailbox<'Msg> =
     inherit IDisposable
@@ -28,6 +33,15 @@ type IMailbox<'Msg> =
     abstract CurrentQueueLength: int
     abstract DefaultTimeout: int with get, set
     abstract Error: IEvent<exn>
+
+    abstract PostAndAsyncReply:
+        buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> CancellableTask<'R>
+
+    abstract PostAndTryAsyncReply:
+        buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> CancellableTask<'R option>
+
+    abstract PostAndReply: buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> 'R
+    abstract TryPostAndReply: buildMessage: (Replier<'R> -> 'Msg) * ?timeout: int -> 'R option
 
 /// Creates mailboxes of one implementation so a scenario can run against each.
 type IMailboxes =
@@ -124,6 +138,31 @@ module Mailboxes =
 
                     member _.Error = mb.Error
                     member _.Dispose() = (mb :> IDisposable).Dispose()
+
+                    // FSharp.Core is hot: the Async is built, and posts, at call time.
+                    member _.PostAndAsyncReply(build, ?timeout) =
+                        let a =
+                            mb.PostAndAsyncReply(
+                                (fun ch -> build (Replier ch.Reply)),
+                                ?timeout = timeout
+                            )
+
+                        fun ct -> Async.StartImmediateAsTask(a, ct)
+
+                    member _.PostAndTryAsyncReply(build, ?timeout) =
+                        let a =
+                            mb.PostAndTryAsyncReply(
+                                (fun ch -> build (Replier ch.Reply)),
+                                ?timeout = timeout
+                            )
+
+                        fun ct -> Async.StartImmediateAsTask(a, ct)
+
+                    member _.PostAndReply(build, ?timeout) =
+                        mb.PostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
+
+                    member _.TryPostAndReply(build, ?timeout) =
+                        mb.TryPostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
                 }
         }
 
@@ -164,6 +203,24 @@ module Mailboxes =
 
                     member _.Error = mb.Error
                     member _.Dispose() = (mb :> IDisposable).Dispose()
+
+                    member _.PostAndAsyncReply(build, ?timeout) =
+                        mb.PostAndAsyncReply(
+                            (fun ch -> build (Replier ch.Reply)),
+                            ?timeout = timeout
+                        )
+
+                    member _.PostAndTryAsyncReply(build, ?timeout) =
+                        mb.PostAndTryAsyncReply(
+                            (fun ch -> build (Replier ch.Reply)),
+                            ?timeout = timeout
+                        )
+
+                    member _.PostAndReply(build, ?timeout) =
+                        mb.PostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
+
+                    member _.TryPostAndReply(build, ?timeout) =
+                        mb.TryPostAndReply((fun ch -> build (Replier ch.Reply)), ?timeout = timeout)
                 }
         }
 

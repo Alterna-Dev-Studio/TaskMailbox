@@ -54,6 +54,22 @@ type TaskMailboxProcessor<'Msg>
     let scanTimedOut () =
         TimeoutException("TaskMailboxProcessor.Scan timed out.")
 
+    // Only the caller's token or the timeout ends this wait; the reply task never faults, so a
+    // caught TimeoutException can only be WaitAsync's own.
+    let waitReply (reply: Task<'R>) (timeout: int) (ct: CancellationToken) : Task<'R voption> =
+        task {
+            try
+                let! r =
+                    if timeout = Timeout.Infinite then
+                        reply.WaitAsync ct
+                    else
+                        reply.WaitAsync(TimeSpan.FromMilliseconds(float timeout), ct)
+
+                return ValueSome r
+            with :? TimeoutException ->
+                return ValueNone
+        }
+
     let tryReadArrival () = arrivals.Reader.TryRead()
 
     let tryRead () =
@@ -307,13 +323,19 @@ type TaskMailboxProcessor<'Msg>
         Task.Run<unit>(fun () -> run cancellationToken)
         |> ignore
 
-    /// <summary>Starts the agent on the current thread, running the body until its first suspension.</summary>
+    /// <summary>Starts the agent on the current thread, running the body until its first suspension,
+    /// then on the thread pool. Never resumes the body on the caller's <c>SynchronizationContext</c>.</summary>
     /// <exception cref='T:System.InvalidOperationException'>Thrown when the agent has already been started.</exception>
     member x.StartImmediate() =
         let run = x.PrepareToStart()
+        let context = SynchronizationContext.Current
+        SynchronizationContext.SetSynchronizationContext null
 
-        run cancellationToken
-        |> ignore
+        try
+            run cancellationToken
+            |> ignore
+        finally
+            SynchronizationContext.SetSynchronizationContext context
 
     /// <summary>Posts a message to the agent. Messages posted after <c>Dispose</c> are dropped.</summary>
     /// <param name="message">The message to post.</param>
@@ -330,6 +352,32 @@ type TaskMailboxProcessor<'Msg>
             // An unbounded channel that is never completed always accepts
             arrivals.Writer.TryWrite message
             |> ignore
+
+    /// Builds a reply channel, posts the message it produces, and returns a task for its reply.
+    /// Validates the timeout first; FSharp.Core posts before validating.
+    member private x.PostRequest
+        (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, timeout: int)
+        : Task<'Reply> =
+        if timeout < -1 then
+            raise (ArgumentOutOfRangeException(nameof timeout, timeout, "Must be -1 or greater."))
+
+        // Unlike Post, a new request always throws after Dispose, regardless of isThrowExceptionAfterDisposed.
+        if isDisposed () then
+            raise (ObjectDisposedException(nameof TaskMailboxProcessor))
+
+        let tcs =
+            TaskCompletionSource<'Reply>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let msg =
+            buildMessage (
+                TaskReplyChannel(fun r ->
+                    tcs.TrySetResult r
+                    |> ignore
+                )
+            )
+
+        x.Post msg
+        tcs.Task
 
     /// <summary>Waits for the next message in arrival order.</summary>
     /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
@@ -397,6 +445,89 @@ type TaskMailboxProcessor<'Msg>
             | ValueSome result -> return Some result
             | ValueNone -> return None
         }
+
+    /// <summary>Posts a request and asynchronously waits for its reply, like <c>PostAndAsyncReply</c>
+    /// but returning <c>None</c> instead of throwing when the timeout elapses.</summary>
+    /// <remarks>
+    /// Cold: nothing is posted until the returned CancellableTask runs. Each run builds a fresh
+    /// reply channel and message and posts a new request.
+    /// </remarks>
+    /// <param name="buildMessage">Builds the message to post, given the reply channel.</param>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. -1 waits indefinitely.</param>
+    /// <returns>A CancellableTask that posts a request and takes its reply when run, or <c>None</c> on timeout.</returns>
+    /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
+    /// <exception cref='T:System.OperationCanceledException'>Thrown when the caller's token is cancelled.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown when run after <c>Dispose</c>.</exception>
+    member x.PostAndTryAsyncReply
+        (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
+        : CancellableTask<'Reply option> =
+        let timeout = defaultArg timeout defaultTimeout
+
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let reply = x.PostRequest(buildMessage, timeout)
+
+            match! waitReply reply timeout ct with
+            | ValueSome r -> return Some r
+            | ValueNone -> return None
+        }
+
+    /// <summary>Posts a request and asynchronously waits for its reply.</summary>
+    /// <remarks>
+    /// Cold: nothing is posted until the returned CancellableTask runs. Each run builds a fresh
+    /// reply channel and message and posts a new request.
+    /// </remarks>
+    /// <param name="buildMessage">Builds the message to post, given the reply channel.</param>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. -1 waits indefinitely.</param>
+    /// <returns>A CancellableTask that posts a request and takes its reply when run.</returns>
+    /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
+    /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
+    /// <exception cref='T:System.OperationCanceledException'>Thrown when the caller's token is cancelled.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown when run after <c>Dispose</c>.</exception>
+    member x.PostAndAsyncReply
+        (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
+        : CancellableTask<'Reply> =
+        let timeout = defaultArg timeout defaultTimeout
+
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let reply = x.PostRequest(buildMessage, timeout)
+
+            match! waitReply reply timeout ct with
+            | ValueSome r -> return r
+            | ValueNone ->
+                return raise (TimeoutException("TaskMailboxProcessor.PostAndAsyncReply timed out."))
+        }
+
+    /// <summary>Like <c>PostAndReply</c>, but returns <c>None</c> instead of throwing when the
+    /// timeout elapses.</summary>
+    /// <remarks>Blocks the calling thread until the reply arrives or the timeout elapses. Calling
+    /// it from the agent's own body deadlocks, as FSharp.Core.</remarks>
+    /// <param name="buildMessage">Builds the message to post, given the reply channel.</param>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. -1 waits indefinitely.</param>
+    /// <returns>The reply, or <c>None</c> on timeout.</returns>
+    /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown after <c>Dispose</c>.</exception>
+    member x.TryPostAndReply
+        (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
+        : 'Reply option =
+        let timeout = defaultArg timeout defaultTimeout
+        let reply = x.PostRequest(buildMessage, timeout)
+
+        if reply.Wait timeout then Some reply.Result else None
+
+    /// <summary>Posts a request and blocks the calling thread until its reply arrives.</summary>
+    /// <remarks>Calling it from the agent's own body deadlocks, as FSharp.Core.</remarks>
+    /// <param name="buildMessage">Builds the message to post, given the reply channel.</param>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. -1 waits indefinitely.</param>
+    /// <returns>The reply.</returns>
+    /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
+    /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown after <c>Dispose</c>.</exception>
+    member x.PostAndReply(buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int) : 'Reply =
+        match x.TryPostAndReply(buildMessage, ?timeout = timeout) with
+        | Some r -> r
+        | None -> raise (TimeoutException("TaskMailboxProcessor.PostAndReply timed out."))
 
     /// <summary>Disposes the agent and drops its queued messages. The body is not cancelled.</summary>
     member x.Dispose() = (x :> IDisposable).Dispose()
