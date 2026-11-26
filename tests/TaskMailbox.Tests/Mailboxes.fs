@@ -10,6 +10,13 @@ open TaskMailbox
 type IInbox<'Msg> =
     abstract Receive: ?timeout: int -> CancellableTask<'Msg>
     abstract TryReceive: ?timeout: int -> CancellableTask<'Msg option>
+
+    abstract Scan:
+        scanner: ('Msg -> CancellableTask<'T> option) * ?timeout: int -> CancellableTask<'T>
+
+    abstract TryScan:
+        scanner: ('Msg -> CancellableTask<'T> option) * ?timeout: int -> CancellableTask<'T option>
+
     abstract CurrentQueueLength: int
 
 /// The owning side of a mailbox.
@@ -36,7 +43,7 @@ module Mailboxes =
 
     /// Runs a CancellableTask as an Async the way FSharp.Core sees an Async body:
     /// a fault is an exception, and cancellation only when the token is cancelled.
-    let private toAsync (body: CancellableTask<unit>) =
+    let private toAsync (body: CancellableTask<'T>) =
         async {
             let! ct = Async.CancellationToken
             let t = body ct
@@ -44,7 +51,7 @@ module Mailboxes =
             return!
                 Async.FromContinuations(fun (ok, error, cancel) ->
                     t.ContinueWith(
-                        (fun (t: Task<unit>) ->
+                        (fun (t: Task<'T>) ->
                             try
                                 t.GetAwaiter().GetResult()
                                 |> ok
@@ -74,6 +81,26 @@ module Mailboxes =
                         member _.TryReceive(?timeout) =
                             let tryReceive = mb.TryReceive(?timeout = timeout)
                             fun ct -> Async.StartImmediateAsTask(tryReceive, ct)
+
+                        member _.Scan(scanner, ?timeout) =
+                            let scan =
+                                mb.Scan(
+                                    scanner
+                                    >> Option.map toAsync,
+                                    ?timeout = timeout
+                                )
+
+                            fun ct -> Async.StartImmediateAsTask(scan, ct)
+
+                        member _.TryScan(scanner, ?timeout) =
+                            let tryScan =
+                                mb.TryScan(
+                                    scanner
+                                    >> Option.map toAsync,
+                                    ?timeout = timeout
+                                )
+
+                            fun ct -> Async.StartImmediateAsTask(tryScan, ct)
 
                         member _.CurrentQueueLength = mb.CurrentQueueLength
                     }
@@ -110,6 +137,11 @@ module Mailboxes =
                     { new IInbox<_> with
                         member _.Receive(?timeout) = mb.Receive(?timeout = timeout)
                         member _.TryReceive(?timeout) = mb.TryReceive(?timeout = timeout)
+                        member _.Scan(scanner, ?timeout) = mb.Scan(scanner, ?timeout = timeout)
+
+                        member _.TryScan(scanner, ?timeout) =
+                            mb.TryScan(scanner, ?timeout = timeout)
+
                         member _.CurrentQueueLength = mb.CurrentQueueLength
                     }
 
