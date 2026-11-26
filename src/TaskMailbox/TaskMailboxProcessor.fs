@@ -361,6 +361,10 @@ type TaskMailboxProcessor<'Msg>
         if timeout < -1 then
             raise (ArgumentOutOfRangeException(nameof timeout, timeout, "Must be -1 or greater."))
 
+        // Unlike Post, a new request always throws after Dispose, regardless of isThrowExceptionAfterDisposed.
+        if isDisposed () then
+            raise (ObjectDisposedException(nameof TaskMailboxProcessor))
+
         let tcs =
             TaskCompletionSource<'Reply>(TaskCreationOptions.RunContinuationsAsynchronously)
 
@@ -453,6 +457,7 @@ type TaskMailboxProcessor<'Msg>
     /// <returns>A CancellableTask that posts a request and takes its reply when run, or <c>None</c> on timeout.</returns>
     /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the caller's token is cancelled.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown when run after <c>Dispose</c>.</exception>
     member x.PostAndTryAsyncReply
         (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
         : CancellableTask<'Reply option> =
@@ -478,6 +483,7 @@ type TaskMailboxProcessor<'Msg>
     /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
     /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the caller's token is cancelled.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown when run after <c>Dispose</c>.</exception>
     member x.PostAndAsyncReply
         (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
         : CancellableTask<'Reply> =
@@ -501,6 +507,7 @@ type TaskMailboxProcessor<'Msg>
     /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. -1 waits indefinitely.</param>
     /// <returns>The reply, or <c>None</c> on timeout.</returns>
     /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown after <c>Dispose</c>.</exception>
     member x.TryPostAndReply
         (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int)
         : 'Reply option =
@@ -516,6 +523,7 @@ type TaskMailboxProcessor<'Msg>
     /// <returns>The reply.</returns>
     /// <exception cref='T:System.TimeoutException'>Thrown when the timeout elapses.</exception>
     /// <exception cref='T:System.ArgumentOutOfRangeException'>Thrown when <c>timeout</c> is below -1.</exception>
+    /// <exception cref='T:System.ObjectDisposedException'>Thrown after <c>Dispose</c>.</exception>
     member x.PostAndReply(buildMessage: TaskReplyChannel<'Reply> -> 'Msg, ?timeout: int) : 'Reply =
         match x.TryPostAndReply(buildMessage, ?timeout = timeout) with
         | Some r -> r

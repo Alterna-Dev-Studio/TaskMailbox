@@ -616,6 +616,50 @@ module TaskMailboxProcessorTests =
 
                         Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
                     }
+
+                // TaskMailbox-only: FSharp.Core's default (isThrowExceptionAfterDisposed = false)
+                // drops a Post after Dispose and leaves the reply task waiting, which hangs an
+                // infinite-timeout request instead of throwing.
+                testList
+                    "New requests throw ObjectDisposedException after Dispose, even without isThrowExceptionAfterDisposed"
+                    [
+                        let calls = requestCalls None
+
+                        for name, call in calls ->
+                            testCaseTask name
+                            <| fun () ->
+                                task {
+                                    let mb =
+                                        new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                            cancellableTask { () }
+                                        )
+
+                                    mb.Start()
+                                    mb.Dispose()
+                                    let mutable builds = 0
+
+                                    let build (ch: TaskReplyChannel<int>) =
+                                        builds <- builds + 1
+                                        ch
+
+                                    do!
+                                        Expect.throwsTaskT<ObjectDisposedException>
+                                            (fun () ->
+                                                Expect.completesWithin
+                                                    waitTime
+                                                    (task {
+                                                        do! call mb build
+                                                        return ()
+                                                    })
+                                                    "Should complete"
+                                                :> Task
+                                            )
+                                            "Should throw ObjectDisposedException"
+
+                                    Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
+                                    Expect.equal builds 0 "Should not call buildMessage"
+                                }
+                    ]
             ]
 
             testList "Error" [
