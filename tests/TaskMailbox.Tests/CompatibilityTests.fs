@@ -777,6 +777,174 @@ module CompatibilityTests =
                     }
             ]
 
+            testList "TryReceive" [
+                testCaseTask "Returns Some for a queued message"
+                <| fun () ->
+                    task {
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive()
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Post 7
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received (Some 7) "Should receive the queued message"
+                    }
+
+                testCaseTask "TryReceive 0 on an empty mailbox returns None"
+                <| fun () ->
+                    task {
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive(0)
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should return None"
+
+                        Expect.equal received None "Should be None"
+                    }
+
+                testCaseTask "TryReceive 10 on an empty mailbox returns None"
+                <| fun () ->
+                    task {
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive(10)
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should return None"
+
+                        Expect.equal received None "Should be None"
+                    }
+
+                testCaseTask "DefaultTimeout applies to TryReceive"
+                <| fun () ->
+                    task {
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! msg = inbox.TryReceive()
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.DefaultTimeout <- 10
+                        mb.Start()
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should return None"
+
+                        Expect.equal received None "Should be None"
+                    }
+
+                testCaseTask "DefaultTimeout is read when TryReceive is called, not when it runs"
+                <| fun () ->
+                    task {
+                        let created = tcs<unit> ()
+                        let go = tcs<unit> ()
+                        let received = tcs<int option> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let tryReceive = inbox.TryReceive()
+                                        created.SetResult()
+                                        do! go.Task
+                                        let! msg = tryReceive
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Start()
+
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                created.Task
+                                "Should create the CancellableTask"
+
+                        mb.DefaultTimeout <- 10
+                        go.SetResult()
+                        do! Task.Delay 100
+                        mb.Post 7
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal
+                            received
+                            (Some 7)
+                            "Should still use the timeout from when TryReceive was called"
+                    }
+
+                testCaseTask "A message posted after None is not lost"
+                <| fun () ->
+                    task {
+                        let timedOut = tcs<unit> ()
+                        let received = tcs<int> ()
+
+                        use mb =
+                            Mailboxes.create
+                                mailboxes
+                                (fun inbox ->
+                                    cancellableTask {
+                                        let! none = inbox.TryReceive(10)
+                                        Expect.equal none None "Should be None"
+                                        timedOut.SetResult()
+
+                                        let! msg = inbox.Receive()
+                                        received.SetResult msg
+                                    }
+                                )
+
+                        mb.Start()
+                        do! Expect.completesWithin waitTime timedOut.Task "Should time out"
+                        mb.Post 7
+
+                        let! received =
+                            Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.equal received 7 "Should receive the later message"
+                    }
+            ]
+
             testList "Start" [
                 testCase "StartImmediate with a cancelled token does not run the body"
                 <| fun () ->

@@ -11,7 +11,7 @@ open IcedTasks
 /// A task-native equivalent of <see cref='T:Microsoft.FSharp.Control.FSharpMailboxProcessor`1'/>.
 /// </summary>
 /// <remarks>
-/// Only one <c>Receive</c> may wait at a time, normally the one in the body's loop.
+/// Only one <c>Receive</c> or <c>TryReceive</c> may wait at a time, normally the one in the body's loop.
 /// </remarks>
 [<Sealed>]
 [<AutoSerializable(false)>]
@@ -73,7 +73,7 @@ type TaskMailboxProcessor<'Msg>
             return result.Value
         }
 
-    let receive (timeout: int) =
+    let tryReceive (timeout: int) : CancellableTask<'Msg voption> =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
 
@@ -89,17 +89,20 @@ type TaskMailboxProcessor<'Msg>
 
             try
                 match (if isDisposed () then ValueNone else tryRead ()) with
-                | ValueSome msg -> return msg
-                | ValueNone when timeout = 0 -> return raise (timedOut ())
-                | ValueNone when timeout < 0 -> return! readAsync ct
+                | ValueSome msg -> return ValueSome msg
+                | ValueNone when timeout = 0 -> return ValueNone
+                | ValueNone when timeout < 0 ->
+                    let! msg = readAsync ct
+                    return ValueSome msg
                 | ValueNone ->
                     use timeoutCts = CancellationTokenSource.CreateLinkedTokenSource ct
                     timeoutCts.CancelAfter timeout
 
                     try
-                        return! readAsync timeoutCts.Token
+                        let! msg = readAsync timeoutCts.Token
+                        return ValueSome msg
                     with :? OperationCanceledException when not ct.IsCancellationRequested ->
-                        return raise (timedOut ())
+                        return ValueNone
             finally
                 Volatile.Write(&receiving, 0)
         }
@@ -182,7 +185,27 @@ type TaskMailboxProcessor<'Msg>
     /// <exception cref='T:System.OperationCanceledException'>Thrown when the token is cancelled.</exception>
     /// <exception cref='T:System.InvalidOperationException'>Thrown when another Receive is waiting.</exception>
     member _.Receive(?timeout: int) : CancellableTask<'Msg> =
-        receive (defaultArg timeout defaultTimeout)
+        let timeout = defaultArg timeout defaultTimeout
+
+        cancellableTask {
+            match! tryReceive timeout with
+            | ValueSome msg -> return msg
+            | ValueNone -> return raise (timedOut ())
+        }
+
+    /// <summary>Like <c>Receive</c>, but returns <c>None</c> when the timeout elapses.</summary>
+    /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
+    /// <returns>A CancellableTask that takes the next message when run, or <c>None</c> on timeout.</returns>
+    /// <exception cref='T:System.OperationCanceledException'>Thrown when the token is cancelled.</exception>
+    /// <exception cref='T:System.InvalidOperationException'>Thrown when another Receive is waiting.</exception>
+    member _.TryReceive(?timeout: int) : CancellableTask<'Msg option> =
+        let timeout = defaultArg timeout defaultTimeout
+
+        cancellableTask {
+            match! tryReceive timeout with
+            | ValueSome msg -> return Some msg
+            | ValueNone -> return None
+        }
 
     /// <summary>Disposes the agent and drops its queued messages. The body is not cancelled.</summary>
     member x.Dispose() = (x :> IDisposable).Dispose()
