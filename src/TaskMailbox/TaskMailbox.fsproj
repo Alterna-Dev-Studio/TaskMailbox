@@ -10,6 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="MailboxBuilder.fs" />
     <Compile Include="TaskMailboxProcessor.fs" />
   </ItemGroup>
   <ItemGroup>

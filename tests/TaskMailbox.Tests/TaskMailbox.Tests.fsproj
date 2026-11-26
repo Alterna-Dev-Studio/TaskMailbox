@@ -12,6 +12,7 @@
     <Compile Include="Mailboxes.fs" />
     <Compile Include="CompatibilityTests.fs" />
     <Compile Include="TaskMailboxProcessorTests.fs" />
+    <Compile Include="MailboxBuilderTests.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>
