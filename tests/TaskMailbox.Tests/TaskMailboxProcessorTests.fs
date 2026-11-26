@@ -290,6 +290,101 @@ module TaskMailboxProcessorTests =
                         "Should see every reply"
             ]
 
+            testList "Request/reply" [
+                // The four request members, posting with `timeout` when given.
+                let requestCalls
+                    (timeout: int option)
+                    : (string *
+                      (TaskMailboxProcessor<TaskReplyChannel<int>>
+                              -> (TaskReplyChannel<int> -> TaskReplyChannel<int>)
+                              -> Task)) list
+                    =
+                    [
+                        "PostAndTryAsyncReply",
+                        (fun mb build ->
+                            task {
+                                let! _ =
+                                    (mb.PostAndTryAsyncReply(build, ?timeout = timeout))
+                                        CancellationToken.None
+
+                                ()
+                            }
+                        )
+
+                        "PostAndAsyncReply",
+                        (fun mb build ->
+                            task {
+                                let! _ =
+                                    (mb.PostAndAsyncReply(build, ?timeout = timeout))
+                                        CancellationToken.None
+
+                                ()
+                            }
+                        )
+
+                        "TryPostAndReply",
+                        (fun mb build ->
+                            task {
+                                do!
+                                    Task.Run(fun () ->
+                                        mb.TryPostAndReply(build, ?timeout = timeout)
+                                        |> ignore
+                                    )
+                            }
+                        )
+
+                        "PostAndReply",
+                        (fun mb build ->
+                            task {
+                                do!
+                                    Task.Run(fun () ->
+                                        mb.PostAndReply(build, ?timeout = timeout)
+                                        |> ignore
+                                    )
+                            }
+                        )
+                    ]
+
+                // Timeout -2 posts nothing: validated before buildMessage runs or Post is called.
+                let calls = requestCalls (Some -2)
+
+                testList "Timeout -2 posts nothing" [
+                    for name, call in calls ->
+                        testCaseTask name
+                        <| fun () ->
+                            task {
+                                use mb =
+                                    new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                        cancellableTask { () }
+                                    )
+
+                                mb.Start()
+                                let mutable builds = 0
+
+                                let build (ch: TaskReplyChannel<int>) =
+                                    builds <- builds + 1
+                                    ch
+
+                                do!
+                                    Expect.throwsTaskT<ArgumentOutOfRangeException>
+                                        (fun () ->
+                                            Expect.completesWithin
+                                                waitTime
+                                                (task {
+                                                    do! call mb build
+                                                    return ()
+                                                })
+                                                "Should complete"
+                                            :> Task
+                                        )
+                                        "Should throw ArgumentOutOfRangeException"
+
+                                Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
+                                Expect.equal builds 0 "Should not call buildMessage"
+                            }
+                ]
+            ]
+
             testList "Error" [
                 testCaseTask
                     "Is raised for OperationCanceledException when the token is not cancelled"
