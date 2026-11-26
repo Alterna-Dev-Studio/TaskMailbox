@@ -1,13 +1,11 @@
 name: Build main
 
 on:
-  # Runs only on pushes to the default branch or pull requests to the default branch
+  # Runs on pushes to the default branch and on every pull request, including stacked ones
   push:
     branches:
       - main
   pull_request:
-    branches:
-      - main
 
 jobs:
   # Builds the project for all supported configurations and operating systems

@@ -6,6 +6,7 @@ A task-native [MailboxProcessor](https://fsharp.github.io/fsharp-core-docs/refer
 
 - `TaskMailboxProcessor<'Msg>` - Same shape and semantics as FSharp.Core's `MailboxProcessor<'Msg>`.
     - `Post`, `Receive`, `Start`, `StartImmediate`, `DefaultTimeout`, `CurrentQueueLength`, `Error`, `Dispose`
+- `mailbox` - A `cancellableTask` whose `return!` is a tail call, so a recursive agent loop runs in constant stack and memory.
 
 ## Why should I use this?
 
@@ -25,7 +26,7 @@ type Message =
 let counter =
     TaskMailboxProcessor.Start(fun inbox ->
         let rec loop count =
-            cancellableTask {
+            mailbox {
                 match! inbox.Receive() with
                 | Increment -> return! loop (count + 1)
                 | Get reply ->
@@ -38,6 +39,8 @@ let counter =
 
 counter.Post Increment
 ```
+
+Write recursive loops with `mailbox`, not `cancellableTask`: a task's `return!` is not a tail call, so each message would grow the stack and keep memory.
 
 See [Compatibility with MailboxProcessor](docsSrc/Explanations/Compatibility.md) for where behavior differs.
 
