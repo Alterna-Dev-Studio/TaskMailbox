@@ -20,7 +20,13 @@ module MailboxBuilderTests =
             do! Task.Yield()
             order.Add $"step{n}"
 
-            if n = 0 then return 0 else return! countdown order (n - 1)
+            if n = 0 then return 42 else return! countdown order (n - 1)
+        }
+
+    let step (order: ResizeArray<string>) (tag: string) : CancellableTask<unit> =
+        mailbox {
+            do! Task.Yield()
+            order.Add tag
         }
 
     [<Tests>]
@@ -110,7 +116,7 @@ module MailboxBuilderTests =
 
                         let! result = outer CancellationToken.None
 
-                        Expect.equal result 0 "Should return the chain's value"
+                        Expect.equal result 42 "Should return the chain's value"
 
                         Expect.sequenceEqual
                             order
@@ -121,6 +127,150 @@ module MailboxBuilderTests =
                                 "finally"
                             ]
                             "Should run finally last"
+                    }
+            ]
+
+            testList "Combine" [
+                testCaseTask "return! followed by more code runs that code after the callee"
+                <| fun () ->
+                    task {
+                        let order = ResizeArray()
+
+                        let outer =
+                            mailbox {
+                                return! step order "first"
+                                order.Add "second"
+                            }
+
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                (outer CancellationToken.None)
+                                "Should complete"
+
+                        Expect.sequenceEqual
+                            order
+                            [
+                                "first"
+                                "second"
+                            ]
+                            "Should flush the callee before running the code after it"
+                    }
+            ]
+
+            testList "While" [
+                testCaseTask "return! in a while body runs before the next iteration"
+                <| fun () ->
+                    task {
+                        let order = ResizeArray()
+                        let mutable i = 0
+
+                        let outer =
+                            mailbox {
+                                while i < 3 do
+                                    i <- i + 1
+                                    return! step order $"iter{i}"
+                            }
+
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                (outer CancellationToken.None)
+                                "Should complete"
+
+                        Expect.sequenceEqual
+                            order
+                            [
+                                "iter1"
+                                "iter2"
+                                "iter3"
+                            ]
+                            "Should flush each iteration's tail call before the next"
+                    }
+            ]
+
+            testList "For" [
+                testCaseTask "return! in a for body runs per element"
+                <| fun () ->
+                    task {
+                        let order = ResizeArray()
+
+                        let outer =
+                            mailbox {
+                                for i in 1..3 do
+                                    return! step order $"elem{i}"
+                            }
+
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                (outer CancellationToken.None)
+                                "Should complete"
+
+                        Expect.sequenceEqual
+                            order
+                            [
+                                "elem1"
+                                "elem2"
+                                "elem3"
+                            ]
+                            "Should flush each element's tail call before the next"
+                    }
+            ]
+
+            testList "Using" [
+                testCaseTask "use is disposed after the tail-called chain"
+                <| fun () ->
+                    task {
+                        let order = ResizeArray()
+
+                        let outer =
+                            mailbox {
+                                use _ = makeDisposable (fun () -> order.Add "disposed")
+                                return! step order "body"
+                            }
+
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                (outer CancellationToken.None)
+                                "Should complete"
+
+                        Expect.sequenceEqual
+                            order
+                            [
+                                "body"
+                                "disposed"
+                            ]
+                            "Should dispose after the tail-called chain"
+                    }
+            ]
+
+            testList "Cancellation" [
+                testCaseTask
+                    "An already-cancelled token faults with OperationCanceledException and runs nothing"
+                <| fun () ->
+                    let count = ref 0
+
+                    let rec loop n : CancellableTask<unit> =
+                        mailbox {
+                            Interlocked.Increment(&count.contents)
+                            |> ignore
+
+                            if n > 0 then
+                                return! loop (n - 1)
+                        }
+
+                    task {
+                        do!
+                            Expect.completesWithin
+                                waitTime
+                                (Expect.throwsTaskT<OperationCanceledException>
+                                    (fun () -> loop 3 (CancellationToken(true)) :> Task)
+                                    "Should fault with OperationCanceledException")
+                                "Should complete"
+
+                        Expect.equal count.contents 0 "Should run nothing"
                     }
             ]
 
@@ -214,6 +364,11 @@ module MailboxBuilderTests =
                         mb.Start()
                         mb.Post 1
                         do! Expect.completesWithin waitTime received.Task "Should receive"
+
+                        Expect.isFalse
+                            disposed.Task.IsCompleted
+                            "Should not dispose before cancellation"
+
                         cts.Cancel()
                         do! Expect.completesWithin waitTime disposed.Task "Should end and dispose"
                     }
