@@ -761,9 +761,13 @@ module TaskMailboxProcessorTests =
                     "Is raised for OperationCanceledException when the token is not cancelled"
                 <| fun () ->
                     task {
+                        let mutable canBeCanceled = true
+
                         use mb =
                             new TaskMailboxProcessor<int>(fun _ ->
                                 cancellableTask {
+                                    let! ct = CancellableTask.getCancellationToken ()
+                                    canBeCanceled <- ct.CanBeCanceled
                                     do! Task.Yield()
                                     raise (OperationCanceledException())
                                 }
@@ -776,6 +780,30 @@ module TaskMailboxProcessorTests =
                         Expect.isTrue
                             (error :? OperationCanceledException)
                             $"Should be OperationCanceledException, was {error}"
+
+                        Expect.isFalse
+                            canBeCanceled
+                            "A token-less agent's body gets CancellationToken.None, not Async.DefaultCancellationToken"
+                    }
+
+                testCaseTask "An Error handler's exception does not escape StartImmediate"
+                <| fun () ->
+                    task {
+                        let mutable handlerRan = false
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(fun _ ->
+                                cancellableTask { raise (Exception "body") }
+                            )
+
+                        mb.Error.Add(fun _ ->
+                            handlerRan <- true
+                            raise (Exception "handler")
+                        )
+
+                        mb.StartImmediate()
+
+                        Expect.isTrue handlerRan "Should run the Error handler"
                     }
             ]
         ]
