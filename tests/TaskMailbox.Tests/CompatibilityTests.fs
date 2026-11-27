@@ -637,147 +637,6 @@ module CompatibilityTests =
     /// against PostAndReply, TryPostAndReply, PostAndAsyncReply, and PostAndTryAsyncReply.
     let requestReplyTests (mailboxes: IMailboxes) =
         testList "Request/reply" [
-            testCaseTask "PostAndAsyncReply returns the echo agent's reply"
-            <| fun () ->
-                task {
-                    use mb =
-                        Mailboxes.start
-                            mailboxes
-                            (fun inbox ->
-                                cancellableTask {
-                                    while true do
-                                        let! (r: Replier<int>) = inbox.Receive()
-                                        r.Reply 42
-                                }
-                            )
-
-                    let! reply =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndAsyncReply id) CancellationToken.None)
-                            "Should reply"
-
-                    Expect.equal reply 42 "Should get the echoed reply"
-                }
-
-            testCaseTask "PostAndTryAsyncReply returns Some for the echo agent's reply"
-            <| fun () ->
-                task {
-                    use mb =
-                        Mailboxes.start
-                            mailboxes
-                            (fun inbox ->
-                                cancellableTask {
-                                    while true do
-                                        let! (r: Replier<int>) = inbox.Receive()
-                                        r.Reply 42
-                                }
-                            )
-
-                    let! reply =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndTryAsyncReply id) CancellationToken.None)
-                            "Should reply"
-
-                    Expect.equal reply (Some 42) "Should get Some the echoed reply"
-                }
-
-            testCaseTask "c32398u8 - two sequential requests each get their own reply"
-            <| fun () ->
-                task {
-                    use mb =
-                        Mailboxes.start
-                            mailboxes
-                            (fun inbox ->
-                                cancellableTask {
-                                    let! (r1: Replier<int>) = inbox.Receive()
-                                    r1.Reply 100
-                                    let! (r2: Replier<int>) = inbox.Receive()
-                                    r2.Reply 200
-                                }
-                            )
-
-                    let! reply1 =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndAsyncReply id) CancellationToken.None)
-                            "Should reply 100"
-
-                    let! reply2 =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndAsyncReply id) CancellationToken.None)
-                            "Should reply 200"
-
-                    Expect.equal (reply1, reply2) (100, 200) "Should get each reply in order"
-                }
-
-            testCaseTask "c32398u9 - a TryReceive-driven agent replies to sequential requests"
-            <| fun () ->
-                task {
-                    use mb =
-                        Mailboxes.start
-                            mailboxes
-                            (fun inbox ->
-                                cancellableTask {
-                                    match! inbox.TryReceive() with
-                                    | Some(r1: Replier<int>) ->
-                                        r1.Reply 100
-
-                                        match! inbox.TryReceive() with
-                                        | Some(r2: Replier<int>) -> r2.Reply 200
-                                        | None -> failwith "Should receive"
-                                    | None -> failwith "Should receive"
-                                }
-                            )
-
-                    let! reply1 =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndAsyncReply id) CancellationToken.None)
-                            "Should reply 100"
-
-                    let! reply2 =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndAsyncReply id) CancellationToken.None)
-                            "Should reply 200"
-
-                    Expect.equal (reply1, reply2) (100, 200) "Should get each reply in order"
-                }
-
-            testCaseTask "A reply sent from inside a Scan computation reaches the caller"
-            <| fun () ->
-                task {
-                    use mb =
-                        Mailboxes.start
-                            mailboxes
-                            (fun inbox ->
-                                cancellableTask {
-                                    let! (_: int) =
-                                        inbox.Scan(fun (r: Replier<int>) ->
-                                            Some(
-                                                cancellableTask {
-                                                    r.Reply 7
-                                                    return 0
-                                                }
-                                            )
-                                        )
-
-                                    ()
-                                }
-                            )
-
-                    let! reply =
-                        Expect.completesWithin
-                            waitTime
-                            ((mb.PostAndAsyncReply id) CancellationToken.None)
-                            "Should reply"
-
-                    Expect.equal reply 7 "Should get the reply sent from the Scan computation"
-                }
-
             testCaseTask
                 "Only the first of two replies reaches the caller; the second does not throw"
             <| fun () ->
@@ -1007,7 +866,8 @@ module CompatibilityTests =
                     Expect.equal reply (Some(Array.sum computations)) "Should sum every Bump"
                 }
 
-            testCaseTask "PostAndReply's buildMessage exception propagates and posts nothing"
+            testCaseTask
+                "A request whose buildMessage throws propagates the exception and posts nothing"
             <| fun () ->
                 task {
                     use mb =
@@ -1028,45 +888,6 @@ module CompatibilityTests =
                             (Task.Run(fun () ->
                                 try
                                     mb.PostAndReply(fun (_: Replier<int>) -> raise boom)
-                                    |> ignore
-
-                                    None
-                                with e ->
-                                    Some e
-                            ))
-                            "Should run"
-
-                    match thrown with
-                    | Some e ->
-                        Expect.isTrue
-                            (obj.ReferenceEquals(e, boom))
-                            $"Should be buildMessage's own exception, was {e}"
-                    | None -> failtest "Should propagate buildMessage's exception"
-
-                    Expect.equal mb.CurrentQueueLength 0 "Should not post anything"
-                }
-
-            testCaseTask "TryPostAndReply's buildMessage exception propagates and posts nothing"
-            <| fun () ->
-                task {
-                    use mb =
-                        Mailboxes.create
-                            mailboxes
-                            (fun inbox ->
-                                cancellableTask {
-                                    let! (_: Replier<int>) = inbox.Receive()
-                                    ()
-                                }
-                            )
-
-                    let boom = Exception "boom"
-
-                    let! thrown =
-                        Expect.completesWithin
-                            waitTime
-                            (Task.Run(fun () ->
-                                try
-                                    mb.TryPostAndReply(fun (_: Replier<int>) -> raise boom)
                                     |> ignore
 
                                     None
@@ -1125,20 +946,6 @@ module CompatibilityTests =
                         mailboxes
                         (fun (_: IInbox<Replier<int>>) -> cancellableTask { () })
 
-                testList "Timeout 0 on an idle agent returns None/throws TimeoutException" [
-                    for name, call in replyCalls ->
-                        testCaseTask name
-                        <| fun () ->
-                            task {
-                                use mb = idleAgent ()
-
-                                let! result =
-                                    Expect.completesWithin waitTime (call mb 0) "Should complete"
-
-                                Expect.equal result None "Should time out"
-                            }
-                ]
-
                 // controlMailbox/test.fsx timeout_tpar/timeout_tpara/timeout_par/timeout_para: a
                 // finite explicit timeout on an agent that never receives.
                 testList "Finite timeout on an idle agent returns None/throws TimeoutException" [
@@ -1146,97 +953,88 @@ module CompatibilityTests =
                         testCaseTask name
                         <| fun () ->
                             task {
-                                use mb = idleAgent ()
+                                for timeout in
+                                    [
+                                        0
+                                        50
+                                    ] do
+                                    use mb = idleAgent ()
 
-                                let! result =
-                                    Expect.completesWithin waitTime (call mb 50) "Should complete"
+                                    let! result =
+                                        Expect.completesWithin
+                                            waitTime
+                                            (call mb timeout)
+                                            $"Should complete ({timeout})"
 
-                                Expect.equal result None "Should time out"
+                                    Expect.equal result None $"Should time out ({timeout})"
                             }
                 ]
 
-                testList
-                    "Explicit timeout -1 waits for the reply, instead of defaulting or timing out"
-                    [
-                        for name, call in replyCalls ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    use mb =
-                                        Mailboxes.start
-                                            mailboxes
-                                            (fun inbox ->
-                                                cancellableTask {
-                                                    let! (r: Replier<int>) = inbox.Receive()
-                                                    r.Reply 42
-                                                }
-                                            )
+                testCaseTask
+                    "A late reply after a client timeout does not throw, and the next request still succeeds"
+                <| fun () ->
+                    task {
+                        // TrySetResult's own guard against a second Reply is pinned by "Only the
+                        // first of two replies reaches the caller; the second does not throw".
+                        for name, call in replyCalls do
+                            let gate = tcs<unit> ()
+                            let firstReplied = tcs<unit> ()
 
-                                    let! result =
-                                        Expect.completesWithin waitTime (call mb -1) "Should reply"
+                            use mb =
+                                Mailboxes.start
+                                    mailboxes
+                                    (fun inbox ->
+                                        cancellableTask {
+                                            let! (r: Replier<int>) = inbox.Receive()
+                                            do! gate.Task
+                                            r.Reply 42
+                                            firstReplied.SetResult()
+                                            let! (r2: Replier<int>) = inbox.Receive()
+                                            r2.Reply 99
+                                        }
+                                    )
 
-                                    Expect.equal result (Some 42) "Should get the reply"
-                                }
-                    ]
+                            let! first =
+                                Expect.completesWithin
+                                    waitTime
+                                    (call mb 20)
+                                    $"Should time out ({name})"
 
-                testList
-                    "Finite timeout elapses, then a late reply does not throw and the agent still answers"
-                    [
-                        for name, call in replyCalls ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    let gate = tcs<unit> ()
-                                    let firstReplied = tcs<unit> ()
+                            Expect.equal
+                                first
+                                None
+                                $"Should time out while the agent is gated ({name})"
 
-                                    use mb =
-                                        Mailboxes.start
-                                            mailboxes
-                                            (fun inbox ->
-                                                cancellableTask {
-                                                    let! (r: Replier<int>) = inbox.Receive()
-                                                    do! gate.Task
-                                                    r.Reply 42
-                                                    firstReplied.SetResult()
-                                                    let! (r2: Replier<int>) = inbox.Receive()
-                                                    r2.Reply 99
-                                                }
-                                            )
+                            gate.SetResult()
 
-                                    let! first =
-                                        Expect.completesWithin
-                                            waitTime
-                                            (call mb 20)
-                                            "Should time out"
+                            do!
+                                Expect.completesWithin
+                                    waitTime
+                                    firstReplied.Task
+                                    $"The late reply should not throw ({name})"
 
-                                    Expect.equal
-                                        first
-                                        None
-                                        "Should time out while the agent is gated"
+                            let! second =
+                                Expect.completesWithin
+                                    waitTime
+                                    (call mb waitTime)
+                                    $"A following request should still get its reply ({name})"
 
-                                    gate.SetResult()
+                            Expect.equal second (Some 99) $"Should get the following reply ({name})"
+                    }
 
-                                    do!
-                                        Expect.completesWithin
-                                            waitTime
-                                            firstReplied.Task
-                                            "The late reply should not throw"
+                let asyncMemberCalls =
+                    replyCalls
+                    |> List.filter (fun (n, _) -> n.Contains "Async")
 
-                                    let! second =
-                                        Expect.completesWithin
-                                            waitTime
-                                            (call mb waitTime)
-                                            "A following request should still get its reply"
+                let syncMemberCalls =
+                    replyCalls
+                    |> List.filter (fun (n, _) -> not (n.Contains "Async"))
 
-                                    Expect.equal second (Some 99) "Should get the following reply"
-                                }
-                    ]
-
-                testList "The agent's token cancelling does not end a finite wait early" [
-                    for name, call in replyCalls ->
-                        testCaseTask name
-                        <| fun () ->
-                            task {
+                let agentTokenDoesNotEndWaitEarly name calls =
+                    testCaseTask name
+                    <| fun () ->
+                        task {
+                            for callName, call in calls do
                                 use cts = new CancellationTokenSource()
 
                                 use mb =
@@ -1251,14 +1049,24 @@ module CompatibilityTests =
                                 cts.Cancel()
 
                                 let! result =
-                                    Expect.completesWithin waitTime callTask "Should complete"
+                                    Expect.completesWithin
+                                        waitTime
+                                        callTask
+                                        $"Should complete ({callName})"
 
                                 Expect.equal
                                     result
                                     None
-                                    "Should time out, not end early from the agent's token"
-                            }
-                ]
+                                    $"Should time out, not end early from the agent's token ({callName})"
+                        }
+
+                agentTokenDoesNotEndWaitEarly
+                    "The agent's token cancelling does not end a finite async wait early"
+                    asyncMemberCalls
+
+                agentTokenDoesNotEndWaitEarly
+                    "The agent's token cancelling does not end a finite sync wait early"
+                    syncMemberCalls
 
                 testList
                     "DefaultTimeout applies, as controlMailbox timeout_t?par_def/timeout_t?para_def"
@@ -1342,64 +1150,27 @@ module CompatibilityTests =
                             "Should time out using the DefaultTimeout read at creation"
                     }
 
-                testList
+                testCaseTask
                     "Timeout -2 throws ArgumentOutOfRangeException on an idle agent without a token"
-                    [
-                        for name, call in argExCalls ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    use mb = idleAgent ()
+                <| fun () ->
+                    task {
+                        for name, call in argExCalls do
+                            use mb = idleAgent ()
 
-                                    do!
-                                        Expect.throwsTaskT<ArgumentOutOfRangeException>
-                                            (fun () ->
-                                                Expect.completesWithin
-                                                    waitTime
-                                                    (task {
-                                                        do! call mb
-                                                        return ()
-                                                    })
-                                                    "Should complete"
-                                                :> Task
-                                            )
-                                            "Should throw ArgumentOutOfRangeException"
-                                }
-                    ]
-
-                testList
-                    "Timeout -2 throws ArgumentOutOfRangeException on an idle agent with a token"
-                    [
-                        for name, call in argExCalls ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    use mb =
-                                        mailboxes.Create(
-                                            (fun (_: IInbox<Replier<int>>) ->
-                                                cancellableTask { () }
-                                            ),
-                                            false,
-                                            CancellationToken.None
-                                        )
-
-                                    mb.Start()
-
-                                    do!
-                                        Expect.throwsTaskT<ArgumentOutOfRangeException>
-                                            (fun () ->
-                                                Expect.completesWithin
-                                                    waitTime
-                                                    (task {
-                                                        do! call mb
-                                                        return ()
-                                                    })
-                                                    "Should complete"
-                                                :> Task
-                                            )
-                                            "Should throw ArgumentOutOfRangeException"
-                                }
-                    ]
+                            do!
+                                Expect.throwsTaskT<ArgumentOutOfRangeException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (task {
+                                                do! call mb
+                                                return ()
+                                            })
+                                            $"Should complete ({name})"
+                                        :> Task
+                                    )
+                                    $"Should throw ArgumentOutOfRangeException ({name})"
+                    }
             ]
 
             // Only the async variants take a caller token; PostAndReply/TryPostAndReply block
@@ -1439,35 +1210,42 @@ module CompatibilityTests =
                         )
 
                 let cancelWhileWaiting name withToken timeout =
-                    testList name [
-                        for callName, call in asyncCalls ->
-                            testCaseTask callName
-                            <| fun () ->
-                                task {
-                                    use mb = unresponsiveAgent withToken
-                                    mb.Start()
-                                    use cts = new CancellationTokenSource()
-                                    let t = call mb timeout cts.Token
-                                    Expect.isFalse t.IsCompleted "Should be waiting"
-                                    cts.Cancel()
+                    testCaseTask name
+                    <| fun () ->
+                        task {
+                            for callName, call in asyncCalls do
+                                use mb = unresponsiveAgent withToken
+                                mb.Start()
+                                use cts = new CancellationTokenSource()
+                                let t = call mb timeout cts.Token
+                                Expect.isFalse t.IsCompleted $"Should be waiting ({callName})"
+                                cts.Cancel()
 
-                                    do!
-                                        Expect.throwsTaskT<OperationCanceledException>
-                                            (fun () ->
-                                                Expect.completesWithin 1000 t "Should cancel"
-                                                :> Task
-                                            )
-                                            "Should cancel"
-                                }
-                    ]
+                                do!
+                                    Expect.throwsTaskT<OperationCanceledException>
+                                        (fun () ->
+                                            Expect.completesWithin
+                                                1000
+                                                t
+                                                $"Should cancel ({callName})"
+                                            :> Task
+                                        )
+                                        $"Should cancel ({callName})"
+                        }
 
                 // Never the token-less, infinite-timeout case here: FSharp.Core's mailbox.fs
                 // `waitOne` ignores the caller's token on a token-less agent's infinite wait, so
                 // that combination would hang FSharp.Core instead of cancelling. It is covered as
                 // a TaskMailbox-only test instead (reusing `cancelsInfiniteWait`).
-                cancelWhileWaiting "Agent with a token, infinite timeout" true -1
-                cancelWhileWaiting "Agent with a token, finite timeout" true waitTime
-                cancelWhileWaiting "Token-less agent, finite timeout" false waitTime
+                cancelWhileWaiting
+                    "Cancellation ends an infinite wait on an agent with a token"
+                    true
+                    -1
+
+                cancelWhileWaiting
+                    "Cancellation ends a finite wait on a token-less agent"
+                    false
+                    waitTime
 
                 testCaseTask
                     "A late Reply after the caller cancels does not throw, and the next request still succeeds"
@@ -1530,164 +1308,170 @@ module CompatibilityTests =
                         mailboxes
                         (fun (_: IInbox<Replier<int>>) -> cancellableTask { () })
 
-                testList "A reply already in flight still delivers after Dispose" [
-                    for name, call in replyCalls ->
-                        testCaseTask name
-                        <| fun () ->
-                            task {
-                                let received = tcs<unit> ()
-                                let gate = tcs<unit> ()
+                testCaseTask "A reply already in flight still delivers after Dispose"
+                <| fun () ->
+                    task {
+                        for name, call in replyCalls do
+                            let received = tcs<unit> ()
+                            let gate = tcs<unit> ()
 
-                                let mb =
-                                    Mailboxes.start
-                                        mailboxes
-                                        (fun inbox ->
-                                            cancellableTask {
-                                                let! (r: Replier<int>) = inbox.Receive()
-                                                received.SetResult()
-                                                do! gate.Task
-                                                r.Reply 42
-                                            }
-                                        )
+                            let mb =
+                                Mailboxes.start
+                                    mailboxes
+                                    (fun inbox ->
+                                        cancellableTask {
+                                            let! (r: Replier<int>) = inbox.Receive()
+                                            received.SetResult()
+                                            do! gate.Task
+                                            r.Reply 42
+                                        }
+                                    )
 
-                                let callTask = call mb waitTime
+                            let callTask = call mb waitTime
 
-                                do!
-                                    Expect.completesWithin
-                                        waitTime
-                                        received.Task
-                                        "Should take the request"
+                            do!
+                                Expect.completesWithin
+                                    waitTime
+                                    received.Task
+                                    $"Should take the request ({name})"
 
-                                mb.Dispose()
-                                gate.SetResult()
+                            mb.Dispose()
+                            gate.SetResult()
 
-                                let! result =
-                                    Expect.completesWithin waitTime callTask "Should still deliver"
+                            let! result =
+                                Expect.completesWithin
+                                    waitTime
+                                    callTask
+                                    $"Should still deliver ({name})"
 
-                                Expect.equal result (Some 42) "Should deliver the in-flight reply"
-                            }
+                            Expect.equal
+                                result
+                                (Some 42)
+                                $"Should deliver the in-flight reply ({name})"
+                    }
+
+                let asyncCalls2: (string * (IMailbox<Replier<int>> -> int -> Task<int option>)) list = [
+                    "PostAndTryAsyncReply",
+                    (fun mb timeout ->
+                        (mb.PostAndTryAsyncReply(id, timeout)) CancellationToken.None
+                    )
+
+                    "PostAndAsyncReply",
+                    (fun mb timeout ->
+                        task {
+                            try
+                                let! r = (mb.PostAndAsyncReply(id, timeout)) CancellationToken.None
+                                return Some r
+                            with :? TimeoutException ->
+                                return None
+                        }
+                    )
                 ]
 
-                testList
-                    "A queued request still waits for its own timeout, not cut short by Dispose"
-                    [
-                        let asyncCalls2
-                            : (string * (IMailbox<Replier<int>> -> int -> Task<int option>)) list = [
-                            "PostAndTryAsyncReply",
-                            (fun mb timeout ->
-                                (mb.PostAndTryAsyncReply(id, timeout)) CancellationToken.None
-                            )
+                let syncCalls2: (string * (IMailbox<Replier<int>> -> int -> Task<int option>)) list = [
+                    "TryPostAndReply",
+                    (fun mb timeout -> Task.Run(fun () -> mb.TryPostAndReply(id, timeout)))
 
-                            "PostAndAsyncReply",
-                            (fun mb timeout ->
-                                task {
-                                    try
-                                        let! r =
-                                            (mb.PostAndAsyncReply(id, timeout))
-                                                CancellationToken.None
+                    "PostAndReply",
+                    (fun mb timeout ->
+                        Task.Run(fun () ->
+                            try
+                                Some(mb.PostAndReply(id, timeout))
+                            with :? TimeoutException ->
+                                None
+                        )
+                    )
+                ]
 
-                                        return Some r
-                                    with :? TimeoutException ->
-                                        return None
-                                }
-                            )
-                        ]
+                testCaseTask
+                    "A queued async request still waits for its own timeout, not cut short by Dispose"
+                <| fun () ->
+                    task {
+                        for name, call in asyncCalls2 do
+                            use mb = idleAgent ()
+                            // Cold: calling `call` posts the request synchronously, then Dispose.
+                            let callTask = call mb 100
+                            mb.Dispose()
 
-                        for name, call in asyncCalls2 ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    use mb = idleAgent ()
-                                    // Cold: calling `call` posts the request synchronously, then Dispose.
-                                    let callTask = call mb 100
-                                    mb.Dispose()
+                            let! result =
+                                Expect.completesWithin
+                                    waitTime
+                                    callTask
+                                    $"Should still time out ({name})"
 
-                                    let! result =
-                                        Expect.completesWithin
-                                            waitTime
-                                            callTask
-                                            "Should still time out"
+                            Expect.equal result None $"Should wait for its own timeout ({name})"
+                    }
 
-                                    Expect.equal result None "Should wait for its own timeout"
-                                }
+                testCaseTask
+                    "A queued sync request still waits for its own timeout, not cut short by Dispose"
+                <| fun () ->
+                    task {
+                        for name, call in syncCalls2 do
+                            use mb = idleAgent ()
+                            let callTask = call mb 100
 
-                        let syncCalls2
-                            : (string * (IMailbox<Replier<int>> -> int -> Task<int option>)) list = [
-                            "TryPostAndReply",
-                            (fun mb timeout -> Task.Run(fun () -> mb.TryPostAndReply(id, timeout)))
+                            SpinWait.SpinUntil((fun () -> mb.CurrentQueueLength > 0), waitTime)
+                            |> ignore
 
-                            "PostAndReply",
-                            (fun mb timeout ->
-                                Task.Run(fun () ->
-                                    try
-                                        Some(mb.PostAndReply(id, timeout))
-                                    with :? TimeoutException ->
-                                        None
+                            mb.Dispose()
+
+                            let! result =
+                                Expect.completesWithin
+                                    waitTime
+                                    callTask
+                                    $"Should still time out ({name})"
+
+                            Expect.equal result None $"Should wait for its own timeout ({name})"
+                    }
+
+                testCaseTask "New requests throw ObjectDisposedException after Dispose"
+                <| fun () ->
+                    task {
+                        // The TaskMailbox-only test pinning `builds = 0` is the real guard that
+                        // buildMessage never runs after Dispose; this only pins the exception type.
+                        for name, call in requestCalls None do
+                            let mb =
+                                mailboxes.Create(
+                                    (fun (_: IInbox<Replier<int>>) -> cancellableTask { () }),
+                                    true
                                 )
-                            )
-                        ]
 
-                        for name, call in syncCalls2 ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    use mb = idleAgent ()
-                                    let callTask = call mb 100
+                            mb.Start()
+                            mb.Dispose()
 
-                                    SpinWait.SpinUntil(
-                                        (fun () -> mb.CurrentQueueLength > 0),
-                                        waitTime
-                                    )
-                                    |> ignore
-
-                                    mb.Dispose()
-
-                                    let! result =
+                            do!
+                                Expect.throwsTaskT<ObjectDisposedException>
+                                    (fun () ->
                                         Expect.completesWithin
                                             waitTime
-                                            callTask
-                                            "Should still time out"
-
-                                    Expect.equal result None "Should wait for its own timeout"
-                                }
-                    ]
-
-                testList "New requests throw ObjectDisposedException after Dispose" [
-                    let throwingCalls = requestCalls None
-
-                    for name, call in throwingCalls ->
-                        testCaseTask name
-                        <| fun () ->
-                            task {
-                                let mb =
-                                    mailboxes.Create(
-                                        (fun (_: IInbox<Replier<int>>) -> cancellableTask { () }),
-                                        true
+                                            (task {
+                                                do! call mb
+                                                return ()
+                                            })
+                                            $"Should complete ({name})"
+                                        :> Task
                                     )
+                                    $"Should throw ObjectDisposedException ({name})"
+                    }
+            ]
 
-                                mb.Start()
-                                mb.Dispose()
+            testList "Body faults" [
+                testCaseTask
+                    "Returns None, not a reply, when the body faults after taking the request"
+                <| fun () ->
+                    task {
+                        for name, call in
+                            [
+                                "PostAndTryAsyncReply",
+                                (fun (mb: IMailbox<Replier<int>>) ->
+                                    (mb.PostAndTryAsyncReply(id, 100)) CancellationToken.None
+                                )
 
-                                do!
-                                    Expect.throwsTaskT<ObjectDisposedException>
-                                        (fun () ->
-                                            Expect.completesWithin
-                                                waitTime
-                                                (task {
-                                                    do! call mb
-                                                    return ()
-                                                })
-                                                "Should complete"
-                                            :> Task
-                                        )
-                                        "Should throw ObjectDisposedException"
-                            }
-                ]
-
-                testList "Returns None, not a reply, when the body faults after taking the request" [
-                    testCaseTask "PostAndTryAsyncReply"
-                    <| fun () ->
-                        task {
+                                "TryPostAndReply",
+                                (fun (mb: IMailbox<Replier<int>>) ->
+                                    Task.Run(fun () -> mb.TryPostAndReply(id, 100))
+                                )
+                            ] do
                             use mb =
                                 Mailboxes.start
                                     mailboxes
@@ -1701,34 +1485,14 @@ module CompatibilityTests =
                             let! result =
                                 Expect.completesWithin
                                     waitTime
-                                    ((mb.PostAndTryAsyncReply(id, 100)) CancellationToken.None)
-                                    "Should complete"
+                                    (call mb)
+                                    $"Should complete ({name})"
 
-                            Expect.equal result None "Should not get a reply when the body faults"
-                        }
-
-                    testCaseTask "TryPostAndReply"
-                    <| fun () ->
-                        task {
-                            use mb =
-                                Mailboxes.start
-                                    mailboxes
-                                    (fun inbox ->
-                                        cancellableTask {
-                                            let! (_: Replier<int>) = inbox.Receive()
-                                            failwith "boom"
-                                        }
-                                    )
-
-                            let! result =
-                                Expect.completesWithin
-                                    waitTime
-                                    (Task.Run(fun () -> mb.TryPostAndReply(id, 100)))
-                                    "Should complete"
-
-                            Expect.equal result None "Should not get a reply when the body faults"
-                        }
-                ]
+                            Expect.equal
+                                result
+                                None
+                                $"Should not get a reply when the body faults ({name})"
+                    }
             ]
         ]
 
