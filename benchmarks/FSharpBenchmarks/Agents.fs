@@ -75,3 +75,13 @@ module Agents =
             failwithf "Sum was %d, expected %d" actual expected
 
         actual
+
+    /// Fails unless <c>actual</c> equals <c>expected</c>.
+    let checkCount (expected: int) (actual: int64) =
+        if
+            actual
+            <> int64 expected
+        then
+            failwithf "Count was %d, expected %d" actual expected
+
+        actual

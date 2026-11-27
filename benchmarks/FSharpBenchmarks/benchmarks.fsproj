@@ -15,6 +15,7 @@
     <Compile Include="ThroughputBenchmarks.fs" />
     <Compile Include="ReplyBenchmarks.fs" />
     <Compile Include="ScanBenchmarks.fs" />
+    <Compile Include="TimeoutBenchmarks.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
