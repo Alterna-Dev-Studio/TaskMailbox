@@ -21,21 +21,6 @@ module TaskMailboxProcessorTests =
     /// A scanner that never matches, typed by use site.
     let neverMatches (_: int) : CancellableTask<'T> option = None
 
-    /// Either a request built by `PostAndAsyncReply`, or a plain message posted directly.
-    type RequestOrPost =
-        | Request of TaskReplyChannel<int>
-        | Post of string
-
-    let label =
-        function
-        | Request _ -> "Request"
-        | Post s -> s
-
-    let replyIfRequest =
-        function
-        | Request r -> r.Reply 1
-        | Post _ -> ()
-
     /// FSharp.Core ignores the caller's token here (mailbox.fs `waitOne`); TaskMailbox cancels.
     let cancelsInfiniteWait
         name
@@ -47,188 +32,265 @@ module TaskMailboxProcessorTests =
             task {
                 use mb = new TaskMailboxProcessor<'Msg>(fun _ -> cancellableTask { () })
                 use cts = new CancellationTokenSource()
-                cts.CancelAfter 10
+                let t = call mb cts.Token
+                Expect.isFalse t.IsCompleted "Should be waiting"
+                cts.Cancel()
 
                 do!
                     Expect.throwsTaskT<OperationCanceledException>
                         (fun () ->
-                            Expect.completesWithin
-                                waitTime
-                                (call mb cts.Token)
-                                "Should cancel an infinite wait"
-                            :> Task
+                            Expect.completesWithin 1000 t "Should cancel an infinite wait" :> Task
                         )
                         "Should cancel an infinite wait"
-            }
-
-    /// TaskMailbox-only: FSharp.Core's mailbox.fs `AsyncHelpers.timeout` passes
-    /// `cancellationContinuation = ignore` to `awaitEither`, so a caller cancel under a finite
-    /// timeout never completes there.
-    let cancelsFiniteWait
-        name
-        (createMb: unit -> TaskMailboxProcessor<int>)
-        (call: TaskMailboxProcessor<int> -> CancellationToken -> Task<'T>)
-        =
-        testCaseTask
-            $"Throws OperationCanceledException when the caller cancels a finite wait ({name})"
-        <| fun () ->
-            task {
-                use mb = createMb ()
-                use cts = new CancellationTokenSource()
-                cts.CancelAfter 10
-
-                do!
-                    Expect.throwsTaskT<OperationCanceledException>
-                        (fun () ->
-                            Expect.completesWithin
-                                waitTime
-                                (call mb cts.Token)
-                                "Should cancel a finite wait"
-                            :> Task
-                        )
-                        "Should cancel a finite wait"
             }
 
     [<Tests>]
     let taskMailboxProcessorTests =
         testList "TaskMailboxProcessor" [
             testList "Receive" [
-                testCaseTask "Throws OperationCanceledException when the caller cancels"
+                testCaseTask
+                    "Throws OperationCanceledException when the caller cancels an infinite wait (no timeout)"
                 <| fun () ->
                     task {
-                        use mb = idle ()
-                        use cts = new CancellationTokenSource(10)
+                        for name, call in
+                            [
+                                "Receive",
+                                (fun (mb: TaskMailboxProcessor<int>) (ct: CancellationToken) ->
+                                    task {
+                                        let! _ = mb.Receive () ct
+                                        ()
+                                    }
+                                )
 
-                        do!
-                            Expect.throwsTaskT<OperationCanceledException>
-                                (fun () -> mb.Receive waitTime cts.Token :> Task)
-                                "Should cancel, not time out"
+                                "TryReceive",
+                                (fun mb ct ->
+                                    task {
+                                        let! _ = mb.TryReceive () ct
+                                        ()
+                                    }
+                                )
+                            ] do
+                            use mb = new TaskMailboxProcessor<int>(fun _ -> cancellableTask { () })
+                            use cts = new CancellationTokenSource()
+                            let t = call mb cts.Token
+                            Expect.isFalse t.IsCompleted $"Should be waiting ({name})"
+                            cts.Cancel()
+
+                            do!
+                                Expect.throwsTaskT<OperationCanceledException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            1000
+                                            t
+                                            $"Should cancel an infinite wait ({name})"
+                                        :> Task
+                                    )
+                                    $"Should cancel an infinite wait ({name})"
                     }
 
-                testCaseTask "Throws InvalidOperationException when another Receive is waiting"
-                <| fun () ->
-                    task {
-                        use mb = idle ()
-                        let first = mb.Receive () CancellationToken.None
-
-                        do!
-                            Expect.throwsTaskT<InvalidOperationException>
-                                (fun () -> mb.Receive () CancellationToken.None :> Task)
-                                "Should allow one reader"
-
-                        mb.Post 1
-                        let! msg = first
-                        Expect.equal msg 1 "First Receive should still receive"
-                    }
-
-                testCaseTask "Throws InvalidOperationException when a Scan is waiting"
-                <| fun () ->
-                    task {
-                        use mb = idle ()
-                        let first = mb.Receive () CancellationToken.None
-
-                        do!
-                            Expect.throwsTaskT<InvalidOperationException>
-                                (fun () -> mb.Scan (neverMatches, 0) CancellationToken.None :> Task)
-                                "Should allow one reader"
-
-                        mb.Post 1
-                        let! msg = first
-                        Expect.equal msg 1 "First Receive should still receive"
-                    }
-
-                cancelsInfiniteWait "no timeout" (fun mb ct -> mb.Receive () ct)
                 cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
+
+                testCaseTask "The agent's token does not cancel a Receive run on another token"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(
+                                (fun _ -> cancellableTask { () }),
+                                cts.Token
+                            )
+
+                        let t = mb.Receive () CancellationToken.None
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
+                        mb.Post 5
+
+                        let! result = Expect.completesWithin waitTime t "Should still receive"
+                        Expect.equal result 5 "Should receive despite the agent's token cancelling"
+                    }
             ]
 
-            testList "TryReceive" [
-                cancelsInfiniteWait "no timeout" (fun mb ct -> mb.TryReceive () ct)
-                cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.TryReceive (-2) ct)
+            testList "Reader guard" [
+                testCaseTask
+                    "Throws InvalidOperationException when a second reader is already waiting"
+                <| fun () ->
+                    task {
+                        for name, startFirst, tryStart in
+                            [
+                                "Receive then Receive",
+                                (fun (mb: TaskMailboxProcessor<int>) ->
+                                    mb.Receive () CancellationToken.None
+                                ),
+                                (fun (mb: TaskMailboxProcessor<int>) ->
+                                    mb.Receive () CancellationToken.None
+                                )
+
+                                "Receive then Scan",
+                                (fun (mb: TaskMailboxProcessor<int>) ->
+                                    mb.Receive () CancellationToken.None
+                                ),
+                                (fun (mb: TaskMailboxProcessor<int>) ->
+                                    mb.Scan (neverMatches, 0) CancellationToken.None
+                                )
+
+                                "Scan then Receive",
+                                (fun (mb: TaskMailboxProcessor<int>) ->
+                                    (mb.Scan(fun m -> Some(cancellableTask { return m })))
+                                        CancellationToken.None
+                                ),
+                                (fun (mb: TaskMailboxProcessor<int>) ->
+                                    mb.Receive () CancellationToken.None
+                                )
+                            ] do
+                            use mb = idle ()
+                            let first = startFirst mb
+
+                            do!
+                                Expect.throwsTaskT<InvalidOperationException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (tryStart mb)
+                                            $"Should allow one reader ({name})"
+                                        :> Task
+                                    )
+                                    $"Should allow one reader ({name})"
+
+                            mb.Post 1
+
+                            let! msg =
+                                Expect.completesWithin
+                                    waitTime
+                                    first
+                                    $"First reader should still receive ({name})"
+
+                            Expect.equal msg 1 $"First reader should still receive ({name})"
+                    }
             ]
 
             testList "Scan" [
-                cancelsInfiniteWait "no timeout" (fun mb ct -> mb.Scan (neverMatches) ct)
-                cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Scan (neverMatches, -2) ct)
-
-                cancelsFiniteWait
-                    "token-less agent"
-                    idle
-                    (fun mb ct -> mb.Scan (neverMatches, waitTime) ct)
-
-                cancelsFiniteWait
-                    "agent with a token"
-                    idleWithToken
-                    (fun mb ct -> mb.Scan (neverMatches, waitTime) ct)
-
-                testCaseTask "Throws InvalidOperationException when a Receive is waiting"
+                testCaseTask
+                    "Throws OperationCanceledException when the caller cancels an infinite wait (no timeout)"
                 <| fun () ->
                     task {
-                        use mb = idle ()
+                        for name, call in
+                            [
+                                "Scan",
+                                (fun (mb: TaskMailboxProcessor<int>) (ct: CancellationToken) ->
+                                    task {
+                                        let! _ = (mb.Scan(neverMatches)) ct
+                                        ()
+                                    }
+                                )
 
-                        let scanTask =
-                            (mb.Scan(fun m ->
-                                if m = 5 then Some(cancellableTask { return m }) else None
-                            ))
+                                "TryScan",
+                                (fun mb ct ->
+                                    task {
+                                        let! _ = (mb.TryScan(neverMatches)) ct
+                                        ()
+                                    }
+                                )
+                            ] do
+                            use mb = new TaskMailboxProcessor<int>(fun _ -> cancellableTask { () })
+                            use cts = new CancellationTokenSource()
+                            let t = call mb cts.Token
+                            Expect.isFalse t.IsCompleted $"Should be waiting ({name})"
+                            cts.Cancel()
+
+                            do!
+                                Expect.throwsTaskT<OperationCanceledException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            1000
+                                            t
+                                            $"Should cancel an infinite wait ({name})"
+                                        :> Task
+                                    )
+                                    $"Should cancel an infinite wait ({name})"
+                    }
+
+                testCaseTask
+                    "Throws OperationCanceledException when the caller cancels a finite wait"
+                <| fun () ->
+                    task {
+                        for name, createMb, call in
+                            [
+                                "Scan, token-less agent",
+                                idle,
+                                (fun (mb: TaskMailboxProcessor<int>) (ct: CancellationToken) ->
+                                    task {
+                                        let! _ = (mb.Scan(neverMatches, waitTime)) ct
+                                        ()
+                                    }
+                                )
+
+                                "Scan, agent with a token",
+                                idleWithToken,
+                                (fun mb ct ->
+                                    task {
+                                        let! _ = (mb.Scan(neverMatches, waitTime)) ct
+                                        ()
+                                    }
+                                )
+
+                                "TryScan, token-less agent",
+                                idle,
+                                (fun mb ct ->
+                                    task {
+                                        let! _ = (mb.TryScan(neverMatches, waitTime)) ct
+                                        ()
+                                    }
+                                )
+
+                                "TryScan, agent with a token",
+                                idleWithToken,
+                                (fun mb ct ->
+                                    task {
+                                        let! _ = (mb.TryScan(neverMatches, waitTime)) ct
+                                        ()
+                                    }
+                                )
+                            ] do
+                            use mb = createMb ()
+                            use cts = new CancellationTokenSource()
+                            let t = call mb cts.Token
+                            Expect.isFalse t.IsCompleted $"Should be waiting ({name})"
+                            cts.Cancel()
+
+                            do!
+                                Expect.throwsTaskT<OperationCanceledException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            1000
+                                            t
+                                            $"Should cancel a finite wait ({name})"
+                                        :> Task
+                                    )
+                                    $"Should cancel a finite wait ({name})"
+                    }
+
+                testCaseTask "The agent's token does not cancel a Scan run on another token"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(
+                                (fun _ -> cancellableTask { () }),
+                                cts.Token
+                            )
+
+                        let t =
+                            (mb.Scan(fun m -> Some(cancellableTask { return m })))
                                 CancellationToken.None
 
-                        do!
-                            Expect.throwsTaskT<InvalidOperationException>
-                                (fun () -> mb.Receive () CancellationToken.None :> Task)
-                                "Should allow one reader"
-
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
                         mb.Post 5
 
-                        let! scanned = Expect.completesWithin waitTime scanTask "Should scan"
-                        Expect.equal scanned 5 "First Scan should still match the later message"
-                    }
-
-                testCaseTask "Releases the reader guard when Scan times out"
-                <| fun () ->
-                    task {
-                        use mb = idle ()
-
-                        do!
-                            Expect.throwsTaskT<TimeoutException>
-                                (fun () -> mb.Scan (neverMatches, 0) CancellationToken.None :> Task)
-                                "Should time out"
-
-                        mb.Post 1
-
-                        let! msg =
-                            Expect.completesWithin
-                                waitTime
-                                (mb.Receive () CancellationToken.None)
-                                "Should receive"
-
-                        Expect.equal msg 1 "Should receive after Scan times out"
-                    }
-
-                testCaseTask "Releases the reader guard when the scanner throws"
-                <| fun () ->
-                    task {
-                        use mb = idle ()
-                        let boom = Exception "boom"
-                        mb.Post 1
-
-                        do!
-                            Expect.throwsTaskT<Exception>
-                                (fun () ->
-                                    mb.Scan
-                                        ((fun (_: int) -> raise boom), 0)
-                                        CancellationToken.None
-                                    :> Task
-                                )
-                                "Should propagate"
-
-                        mb.Post 2
-
-                        let! msg =
-                            Expect.completesWithin
-                                waitTime
-                                (mb.Receive () CancellationToken.None)
-                                "Should receive"
-
-                        Expect.equal msg 1 "Should receive after the scanner throws"
+                        let! result = Expect.completesWithin waitTime t "Should still scan"
+                        Expect.equal result 5 "Should scan despite the agent's token cancelling"
                     }
 
                 testCaseTask "Keeps a newly arrived message the scanner throws on, in order"
@@ -270,21 +332,6 @@ module TaskMailboxProcessorTests =
 
                         Expect.equal r2 2 "Should receive 2"
                     }
-            ]
-
-            testList "TryScan" [
-                cancelsInfiniteWait "no timeout" (fun mb ct -> mb.TryScan (neverMatches) ct)
-                cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.TryScan (neverMatches, -2) ct)
-
-                cancelsFiniteWait
-                    "token-less agent"
-                    idle
-                    (fun mb ct -> mb.TryScan (neverMatches, waitTime) ct)
-
-                cancelsFiniteWait
-                    "agent with a token"
-                    idleWithToken
-                    (fun mb ct -> mb.TryScan (neverMatches, waitTime) ct)
             ]
 
             testList "TaskReplyChannel" [
@@ -363,303 +410,350 @@ module TaskMailboxProcessorTests =
                 // Timeout -2 posts nothing: validated before buildMessage runs or Post is called.
                 let calls = requestCalls (Some -2)
 
-                // Only the async variants take a caller token.
-                let asyncCalls
+                // Only the async variants take a caller token, and build an op separately from
+                // running it, so coldness and an already-cancelled token can both be checked.
+                let asyncOps
                     : (string *
                       (TaskMailboxProcessor<TaskReplyChannel<int>>
                               -> (TaskReplyChannel<int> -> TaskReplyChannel<int>)
-                              -> CancellationToken
-                              -> Task<unit>)) list = [
+                              -> (CancellationToken -> Task<unit>))) list = [
                     "PostAndTryAsyncReply",
-                    (fun mb build ct ->
-                        task {
-                            let! _ = (mb.PostAndTryAsyncReply build) ct
-                            ()
-                        }
+                    (fun mb build ->
+                        let op = mb.PostAndTryAsyncReply build
+                        fun ct -> task { let! _ = op ct in () }
                     )
 
                     "PostAndAsyncReply",
-                    (fun mb build ct ->
+                    (fun mb build ->
+                        let op = mb.PostAndAsyncReply build
+                        fun ct -> task { let! _ = op ct in () }
+                    )
+                ]
+
+                testCaseTask "Timeout -2 posts nothing"
+                <| fun () ->
+                    task {
+                        for name, call in calls do
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                    cancellableTask { () }
+                                )
+
+                            mb.Start()
+                            let mutable builds = 0
+
+                            let build (ch: TaskReplyChannel<int>) =
+                                builds <- builds + 1
+                                ch
+
+                            do!
+                                Expect.throwsTaskT<ArgumentOutOfRangeException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (task {
+                                                do! call mb build
+                                                return ()
+                                            })
+                                            $"Should complete ({name})"
+                                        :> Task
+                                    )
+                                    $"Should throw ArgumentOutOfRangeException ({name})"
+
+                            Expect.equal mb.CurrentQueueLength 0 $"Should post nothing ({name})"
+                            Expect.equal builds 0 $"Should not call buildMessage ({name})"
+                    }
+
+                testCaseTask
+                    "Throws OperationCanceledException when the caller cancels an infinite wait (token-less agent)"
+                <| fun () ->
+                    task {
+                        for name, call in
+                            [
+                                "PostAndTryAsyncReply",
+                                (fun
+                                    (mb: TaskMailboxProcessor<TaskReplyChannel<int>>)
+                                    (ct: CancellationToken) ->
+                                    task {
+                                        let! _ = (mb.PostAndTryAsyncReply id) ct
+                                        ()
+                                    }
+                                )
+
+                                "PostAndAsyncReply",
+                                (fun mb ct ->
+                                    task {
+                                        let! _ = (mb.PostAndAsyncReply id) ct
+                                        ()
+                                    }
+                                )
+                            ] do
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                    cancellableTask { () }
+                                )
+
+                            use cts = new CancellationTokenSource()
+                            let t = call mb cts.Token
+                            Expect.isFalse t.IsCompleted $"Should be waiting ({name})"
+                            cts.Cancel()
+
+                            do!
+                                Expect.throwsTaskT<OperationCanceledException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            1000
+                                            t
+                                            $"Should cancel an infinite wait ({name})"
+                                        :> Task
+                                    )
+                                    $"Should cancel an infinite wait ({name})"
+                    }
+
+                testCaseTask
+                    "Creating the op posts nothing until it runs, even with an already-cancelled token"
+                <| fun () ->
+                    task {
+                        for name, createOp in asyncOps do
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                    cancellableTask { () }
+                                )
+
+                            mb.Start()
+                            let mutable builds = 0
+
+                            let build (ch: TaskReplyChannel<int>) =
+                                builds <- builds + 1
+                                ch
+
+                            let run = createOp mb build
+
+                            Expect.equal
+                                mb.CurrentQueueLength
+                                0
+                                $"Should post nothing before running ({name})"
+
+                            Expect.equal
+                                builds
+                                0
+                                $"Should not call buildMessage before running ({name})"
+
+                            use cts = new CancellationTokenSource()
+                            cts.Cancel()
+
+                            do!
+                                Expect.throwsTaskT<OperationCanceledException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (run cts.Token)
+                                            $"Should complete ({name})"
+                                        :> Task
+                                    )
+                                    $"Should throw OperationCanceledException ({name})"
+
+                            Expect.equal mb.CurrentQueueLength 0 $"Should post nothing ({name})"
+                            Expect.equal builds 0 $"Should not call buildMessage ({name})"
+                    }
+
+                // Each member's call to the agent's reply channel, ignoring the reply value.
+                let replyOps
+                    : (string *
+                      (TaskMailboxProcessor<TaskReplyChannel<int>> -> CancellationToken -> Task)) list = [
+                    "PostAndAsyncReply",
+                    (fun mb ct ->
                         task {
-                            let! _ = (mb.PostAndAsyncReply build) ct
+                            let! _ = (mb.PostAndAsyncReply id) ct
+                            ()
+                        }
+                    )
+
+                    "PostAndTryAsyncReply",
+                    (fun mb ct ->
+                        task {
+                            let! _ = (mb.PostAndTryAsyncReply id) ct
                             ()
                         }
                     )
                 ]
 
-                testList "Timeout -2 posts nothing" [
-                    for name, call in calls ->
-                        testCaseTask name
-                        <| fun () ->
-                            task {
-                                use mb =
-                                    new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
-                                        cancellableTask { () }
-                                    )
-
-                                mb.Start()
-                                let mutable builds = 0
-
-                                let build (ch: TaskReplyChannel<int>) =
-                                    builds <- builds + 1
-                                    ch
-
-                                do!
-                                    Expect.throwsTaskT<ArgumentOutOfRangeException>
-                                        (fun () ->
-                                            Expect.completesWithin
-                                                waitTime
-                                                (task {
-                                                    do! call mb build
-                                                    return ()
-                                                })
-                                                "Should complete"
-                                            :> Task
-                                        )
-                                        "Should throw ArgumentOutOfRangeException"
-
-                                Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
-                                Expect.equal builds 0 "Should not call buildMessage"
-                            }
-                ]
-
-                cancelsInfiniteWait
-                    "PostAndTryAsyncReply, token-less agent"
-                    (fun mb ct -> (mb.PostAndTryAsyncReply id) ct)
-
-                cancelsInfiniteWait
-                    "PostAndAsyncReply, token-less agent"
-                    (fun mb ct -> (mb.PostAndAsyncReply id) ct)
-
-                testList "An already-cancelled token posts nothing" [
-                    for name, call in asyncCalls ->
-                        testCaseTask name
-                        <| fun () ->
-                            task {
-                                use mb =
-                                    new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
-                                        cancellableTask { () }
-                                    )
-
-                                mb.Start()
-                                let mutable builds = 0
-
-                                let build (ch: TaskReplyChannel<int>) =
-                                    builds <- builds + 1
-                                    ch
-
-                                use cts = new CancellationTokenSource()
-                                cts.Cancel()
-
-                                do!
-                                    Expect.throwsTaskT<OperationCanceledException>
-                                        (fun () ->
-                                            Expect.completesWithin
-                                                waitTime
-                                                (call mb build cts.Token)
-                                                "Should complete"
-                                            :> Task
-                                        )
-                                        "Should throw OperationCanceledException"
-
-                                Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
-                                Expect.equal builds 0 "Should not call buildMessage"
-                            }
-                ]
-
-                testList "Creating the op posts nothing until it runs" [
-                    testCase "PostAndAsyncReply"
-                    <| fun () ->
-                        use mb =
-                            new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
-                                cancellableTask { () }
-                            )
-
-                        mb.Start()
-                        let mutable builds = 0
-
-                        let build (ch: TaskReplyChannel<int>) =
-                            builds <- builds + 1
-                            ch
-
-                        mb.PostAndAsyncReply build
-                        |> ignore
-
-                        Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
-                        Expect.equal builds 0 "Should not call buildMessage"
-
-                    testCase "PostAndTryAsyncReply"
-                    <| fun () ->
-                        use mb =
-                            new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
-                                cancellableTask { () }
-                            )
-
-                        mb.Start()
-                        let mutable builds = 0
-
-                        let build (ch: TaskReplyChannel<int>) =
-                            builds <- builds + 1
-                            ch
-
-                        mb.PostAndTryAsyncReply build
-                        |> ignore
-
-                        Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
-                        Expect.equal builds 0 "Should not call buildMessage"
-                ]
-
-                testCaseTask
-                    "Running the op after posting a plain message delivers that message first"
+                testCaseTask "Reply does not run the caller's continuation inline"
                 <| fun () ->
                     task {
-                        let received = ResizeArray<string>()
+                        for name, op in replyOps do
+                            let gate = tcs<unit> ()
+                            let afterReply = TaskCompletionSource()
 
-                        use mb =
-                            new TaskMailboxProcessor<RequestOrPost>(fun inbox ->
-                                cancellableTask {
-                                    let! m1 = inbox.Receive()
-                                    received.Add(label m1)
-                                    replyIfRequest m1
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun inbox ->
+                                    cancellableTask {
+                                        let! (r: TaskReplyChannel<int>) = inbox.Receive()
+                                        do! gate.Task
+                                        r.Reply 1
+                                        afterReply.SetResult()
+                                    }
+                                )
 
-                                    let! m2 = inbox.Receive()
-                                    received.Add(label m2)
-                                    replyIfRequest m2
+                            mb.Start()
+
+                            let caller =
+                                task {
+                                    do! op mb CancellationToken.None
+                                    return afterReply.Task.Wait 1000
                                 }
-                            )
 
-                        mb.Start()
-                        let op = mb.PostAndAsyncReply(Request)
-                        mb.Post(Post "B")
+                            Expect.isFalse
+                                caller.IsCompleted
+                                $"Should be waiting on the gate ({name})"
 
-                        let! result =
-                            Expect.completesWithin
-                                waitTime
-                                (op CancellationToken.None)
-                                "Should reply"
+                            gate.SetResult()
 
-                        Expect.equal result 1 "Should still get the request's own reply"
+                            let! ok =
+                                Expect.completesWithin waitTime caller $"Should reply ({name})"
 
-                        Expect.equal
-                            (List.ofSeq received)
-                            [
-                                "B"
-                                "Request"
-                            ]
-                            "The agent should receive the already-posted message first"
+                            Expect.isTrue
+                                ok
+                                $"Reply should not run the caller's continuation inline ({name})"
                     }
+
+                // Both async request members. Each builds its op once, so running it twice
+                // reuses the same cold CancellableTask, as a caller would.
+                let asyncRequestCalls
+                    : (string *
+                      (TaskMailboxProcessor<TaskReplyChannel<int>>
+                              -> (TaskReplyChannel<int> -> TaskReplyChannel<int>)
+                              -> (CancellationToken -> Task<int>))) list = [
+                    "PostAndTryAsyncReply",
+                    (fun mb build ->
+                        let op = mb.PostAndTryAsyncReply build
+
+                        fun ct ->
+                            task {
+                                let! r = op ct
+                                return r.Value
+                            }
+                    )
+
+                    "PostAndAsyncReply", (fun mb build -> mb.PostAndAsyncReply build)
+                ]
 
                 testCaseTask "Running the same op twice posts two requests, each with its own reply"
                 <| fun () ->
                     task {
-                        use mb =
-                            new TaskMailboxProcessor<TaskReplyChannel<int>>(fun inbox ->
-                                let rec loop n =
-                                    mailbox {
-                                        let! (r: TaskReplyChannel<int>) = inbox.Receive()
-                                        r.Reply n
-                                        return! loop (n + 1)
-                                    }
+                        for name, call in asyncRequestCalls do
+                            use mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun inbox ->
+                                    let rec loop n =
+                                        mailbox {
+                                            let! (r: TaskReplyChannel<int>) = inbox.Receive()
+                                            r.Reply n
+                                            return! loop (n + 1)
+                                        }
 
-                                loop 1
-                            )
-
-                        mb.Start()
-                        let mutable builds = 0
-
-                        let build (ch: TaskReplyChannel<int>) =
-                            builds <- builds + 1
-                            ch
-
-                        let op = mb.PostAndAsyncReply build
-
-                        let! r1 =
-                            Expect.completesWithin
-                                waitTime
-                                (op CancellationToken.None)
-                                "Should reply"
-
-                        let! r2 =
-                            Expect.completesWithin
-                                waitTime
-                                (op CancellationToken.None)
-                                "Should reply"
-
-                        Expect.equal builds 2 "Should call buildMessage for each run"
-                        Expect.equal (r1, r2) (1, 2) "Should get a fresh reply for each run"
-                    }
-
-                testCaseTask
-                    "buildMessage throwing faults the run instead of the call, and posts nothing"
-                <| fun () ->
-                    task {
-                        use mb =
-                            new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
-                                cancellableTask { () }
-                            )
-
-                        mb.Start()
-                        let boom = Exception "boom"
-
-                        let op = mb.PostAndAsyncReply(fun (_: TaskReplyChannel<int>) -> raise boom)
-
-                        do!
-                            Expect.throwsTaskT<Exception>
-                                (fun () ->
-                                    Expect.completesWithin
-                                        waitTime
-                                        (op CancellationToken.None)
-                                        "Should run"
-                                    :> Task
+                                    loop 1
                                 )
-                                "Should propagate buildMessage's exception"
 
-                        Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
+                            mb.Start()
+                            let mutable builds = 0
+
+                            let build (ch: TaskReplyChannel<int>) =
+                                builds <- builds + 1
+                                ch
+
+                            let op = call mb build
+
+                            let! r1 =
+                                Expect.completesWithin
+                                    waitTime
+                                    (op CancellationToken.None)
+                                    $"Should reply ({name})"
+
+                            let! r2 =
+                                Expect.completesWithin
+                                    waitTime
+                                    (op CancellationToken.None)
+                                    $"Should reply ({name})"
+
+                            Expect.equal builds 2 $"Should call buildMessage for each run ({name})"
+
+                            Expect.equal
+                                (r1, r2)
+                                (1, 2)
+                                $"Should get a fresh reply for each run ({name})"
                     }
 
                 // TaskMailbox-only: FSharp.Core's default (isThrowExceptionAfterDisposed = false)
                 // drops a Post after Dispose and leaves the reply task waiting, which hangs an
                 // infinite-timeout request instead of throwing.
-                testList
+                testCaseTask
                     "New requests throw ObjectDisposedException after Dispose, even without isThrowExceptionAfterDisposed"
-                    [
-                        let calls = requestCalls None
+                <| fun () ->
+                    task {
+                        for name, call in requestCalls None do
+                            let mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                    cancellableTask { () }
+                                )
 
-                        for name, call in calls ->
-                            testCaseTask name
-                            <| fun () ->
-                                task {
-                                    let mb =
-                                        new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
-                                            cancellableTask { () }
-                                        )
+                            mb.Start()
+                            mb.Dispose()
+                            let mutable builds = 0
 
-                                    mb.Start()
-                                    mb.Dispose()
-                                    let mutable builds = 0
+                            let build (ch: TaskReplyChannel<int>) =
+                                builds <- builds + 1
+                                ch
 
-                                    let build (ch: TaskReplyChannel<int>) =
-                                        builds <- builds + 1
-                                        ch
+                            do!
+                                Expect.throwsTaskT<ObjectDisposedException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (task {
+                                                do! call mb build
+                                                return ()
+                                            })
+                                            $"Should complete ({name})"
+                                        :> Task
+                                    )
+                                    $"Should throw ObjectDisposedException ({name})"
 
-                                    do!
-                                        Expect.throwsTaskT<ObjectDisposedException>
-                                            (fun () ->
-                                                Expect.completesWithin
-                                                    waitTime
-                                                    (task {
-                                                        do! call mb build
-                                                        return ()
-                                                    })
-                                                    "Should complete"
-                                                :> Task
-                                            )
-                                            "Should throw ObjectDisposedException"
+                            Expect.equal mb.CurrentQueueLength 0 $"Should post nothing ({name})"
+                            Expect.equal builds 0 $"Should not call buildMessage ({name})"
+                    }
 
-                                    Expect.equal mb.CurrentQueueLength 0 "Should post nothing"
-                                    Expect.equal builds 0 "Should not call buildMessage"
-                                }
-                    ]
+                testCaseTask
+                    "A request whose buildMessage disposes the agent fails with ObjectDisposedException"
+                <| fun () ->
+                    task {
+                        for name, call in requestCalls None do
+                            let mb =
+                                new TaskMailboxProcessor<TaskReplyChannel<int>>(fun _ ->
+                                    cancellableTask { () }
+                                )
+
+                            mb.Start()
+
+                            let build (ch: TaskReplyChannel<int>) =
+                                mb.Dispose()
+                                ch
+
+                            do!
+                                Expect.throwsTaskT<ObjectDisposedException>
+                                    (fun () ->
+                                        Expect.completesWithin
+                                            waitTime
+                                            (task {
+                                                do! call mb build
+                                                return ()
+                                            })
+                                            $"Should complete ({name})"
+                                        :> Task
+                                    )
+                                    $"Should throw ObjectDisposedException ({name})"
+
+                            Expect.equal mb.CurrentQueueLength 0 $"Should post nothing ({name})"
+                    }
             ]
 
             testList "Error" [
