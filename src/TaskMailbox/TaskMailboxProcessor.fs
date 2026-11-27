@@ -364,7 +364,7 @@ type TaskMailboxProcessor<'Msg>
 
     /// Builds a reply channel, posts the message it produces, and returns a task for its reply.
     /// Validates the timeout first; FSharp.Core posts before validating.
-    member private x.PostRequest
+    member private _.PostRequest
         (buildMessage: TaskReplyChannel<'Reply> -> 'Msg, timeout: int)
         : Task<'Reply> =
         if timeout < -1 then
