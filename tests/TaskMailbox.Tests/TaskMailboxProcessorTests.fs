@@ -1,6 +1,7 @@
 namespace TaskMailbox.Tests
 
 open System
+open System.Reflection
 open System.Threading
 open System.Threading.Tasks
 open Expecto
@@ -761,9 +762,13 @@ module TaskMailboxProcessorTests =
                     "Is raised for OperationCanceledException when the token is not cancelled"
                 <| fun () ->
                     task {
+                        let mutable canBeCanceled = true
+
                         use mb =
                             new TaskMailboxProcessor<int>(fun _ ->
                                 cancellableTask {
+                                    let! ct = CancellableTask.getCancellationToken ()
+                                    canBeCanceled <- ct.CanBeCanceled
                                     do! Task.Yield()
                                     raise (OperationCanceledException())
                                 }
@@ -776,6 +781,66 @@ module TaskMailboxProcessorTests =
                         Expect.isTrue
                             (error :? OperationCanceledException)
                             $"Should be OperationCanceledException, was {error}"
+
+                        Expect.isFalse
+                            canBeCanceled
+                            "A token-less agent's body gets CancellationToken.None, not Async.DefaultCancellationToken"
                     }
+
+                testCaseTask "An Error handler's exception does not escape StartImmediate"
+                <| fun () ->
+                    task {
+                        let mutable handlerRan = false
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(fun _ ->
+                                cancellableTask { raise (Exception "body") }
+                            )
+
+                        mb.Error.Add(fun _ ->
+                            handlerRan <- true
+                            raise (Exception "handler")
+                        )
+
+                        mb.StartImmediate()
+
+                        Expect.isTrue handlerRan "Should run the Error handler"
+                    }
+            ]
+
+            testList "Public API" [
+                testCase "Every MailboxProcessor member has a TaskMailboxProcessor counterpart"
+                <| fun () ->
+                    let surface (t: Type) =
+                        let flags =
+                            BindingFlags.Public
+                            ||| BindingFlags.Instance
+                            ||| BindingFlags.Static
+                            ||| BindingFlags.DeclaredOnly
+
+                        set [
+                            for c in t.GetConstructors() ->
+                                ".ctor", false, [ for p in c.GetParameters() -> p.Name ]
+                            for m in t.GetMethods flags ->
+                                m.Name, m.IsStatic, [ for p in m.GetParameters() -> p.Name ]
+                        ]
+
+                    let fsharp = surface typedefof<MailboxProcessor<_>>
+                    let taskMailbox = surface typedefof<TaskMailboxProcessor<_>>
+
+                    // Types differ by design (Async vs CancellableTask), so only names are compared.
+                    // Each entry here needs a row in Compatibility.md.
+                    let omitted = Set.empty
+                    let added = Set.empty
+
+                    Expect.equal
+                        (Set.difference fsharp taskMailbox)
+                        omitted
+                        "MailboxProcessor members missing from TaskMailboxProcessor"
+
+                    Expect.equal
+                        (Set.difference taskMailbox fsharp)
+                        added
+                        "TaskMailboxProcessor members MailboxProcessor lacks"
             ]
         ]

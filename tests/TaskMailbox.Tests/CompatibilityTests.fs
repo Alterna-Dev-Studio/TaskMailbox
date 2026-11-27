@@ -1457,7 +1457,7 @@ module CompatibilityTests =
 
             testList "Body faults" [
                 testCaseTask
-                    "Returns None, not a reply, when the body faults after taking the request"
+                    "Returns None and raises Error when the body faults after taking the request"
                 <| fun () ->
                     task {
                         for name, call in
@@ -1472,15 +1472,21 @@ module CompatibilityTests =
                                     Task.Run(fun () -> mb.TryPostAndReply(id, 100))
                                 )
                             ] do
+                            let boom = Exception "boom"
+
+                            // controlMailbox test.fsx Error (2): Error is raised after a Receive.
                             use mb =
-                                Mailboxes.start
+                                Mailboxes.create
                                     mailboxes
                                     (fun inbox ->
                                         cancellableTask {
                                             let! (_: Replier<int>) = inbox.Receive()
-                                            failwith "boom"
+                                            raise boom
                                         }
                                     )
+
+                            let error = firstFrom mb.Error
+                            mb.Start()
 
                             let! result =
                                 Expect.completesWithin
@@ -1492,6 +1498,13 @@ module CompatibilityTests =
                                 result
                                 None
                                 $"Should not get a reply when the body faults ({name})"
+
+                            let! raised =
+                                Expect.completesWithin waitTime error $"Should raise Error ({name})"
+
+                            Expect.isTrue
+                                (obj.ReferenceEquals(raised, boom))
+                                $"Should be the body's exception, was {raised} ({name})"
                     }
             ]
         ]

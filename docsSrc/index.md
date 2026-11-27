@@ -18,5 +18,6 @@ open TaskMailbox
 ## Learn the concepts
 
 - [Compatibility with MailboxProcessor](Explanations/Compatibility.html)
+- [Choosing TaskMailbox](Explanations/Choosing-TaskMailbox.html)
 
 If you need API signatures, generated reference documentation is available under [API Reference](reference/index.html).

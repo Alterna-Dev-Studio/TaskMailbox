@@ -69,6 +69,7 @@ worker.Post Stop
 ```
 
 See [Compatibility with MailboxProcessor](docsSrc/Explanations/Compatibility.md) for where behavior differs.
+See [Choosing TaskMailbox](docsSrc/Explanations/Choosing-TaskMailbox.md) for how it compares with other lightweight options.
 
 ---
 
