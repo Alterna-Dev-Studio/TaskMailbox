@@ -8,6 +8,9 @@ open IcedTasks
 open TaskMailbox
 
 module MailboxBuilderTests =
+    open TestHelpers
+
+    let waitTime = 5000
 
     let rec spin n : CancellableTask<int> =
         mailbox { if n = 0 then return 42 else return! spin (n - 1) }
@@ -119,5 +122,162 @@ module MailboxBuilderTests =
                             ]
                             "Should run finally last"
                     }
+            ]
+
+            testList "mailbox { } agents" [
+                testCaseTask "Recursive loop drains a pre-queued backlog in order"
+                <| fun () ->
+                    task {
+                        let n = 100000
+                        let received = ResizeArray()
+                        let completed = tcs<unit> ()
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(fun inbox ->
+                                let rec loop () =
+                                    mailbox {
+                                        let! msg = inbox.Receive()
+                                        received.Add msg
+
+                                        if msg = n - 1 then
+                                            completed.SetResult()
+
+                                        return! loop ()
+                                    }
+
+                                loop ()
+                            )
+
+                        for i in 0 .. n - 1 do
+                            mb.Post i
+
+                        mb.Start()
+                        do! Expect.completesWithin waitTime completed.Task "Should receive all"
+
+                        Expect.equal
+                            (List.ofSeq received)
+                            [ 0 .. n - 1 ]
+                            "Should receive in arrival order"
+                    }
+
+                testCase "StartImmediate runs tail-called iterations inline"
+                <| fun () ->
+                    let mutable steps = 0
+
+                    use mb =
+                        new TaskMailboxProcessor<int>(fun inbox ->
+                            let rec loop n =
+                                mailbox {
+                                    steps <- n
+
+                                    if n < 5 then
+                                        return! loop (n + 1)
+                                    else
+                                        let! (_: int) = inbox.Receive()
+                                        ()
+                                }
+
+                            loop 0
+                        )
+
+                    mb.StartImmediate()
+                    Expect.equal steps 5 "Should run until the first Receive"
+
+                testCaseTask "Cancellation ends a recursive loop"
+                <| fun () ->
+                    task {
+                        let received = tcs<unit> ()
+                        let disposed = tcs<unit> ()
+                        use cts = new CancellationTokenSource()
+
+                        let mb =
+                            new TaskMailboxProcessor<int>(
+                                (fun inbox ->
+                                    let rec loop () =
+                                        mailbox {
+                                            let! (_: int) = inbox.Receive()
+
+                                            received.TrySetResult()
+                                            |> ignore
+
+                                            return! loop ()
+                                        }
+
+                                    mailbox {
+                                        use _ = makeDisposable disposed.SetResult
+                                        return! loop ()
+                                    }
+                                ),
+                                cts.Token
+                            )
+
+                        mb.Start()
+                        mb.Post 1
+                        do! Expect.completesWithin waitTime received.Task "Should receive"
+                        cts.Cancel()
+                        do! Expect.completesWithin waitTime disposed.Task "Should end and dispose"
+                    }
+
+                testCaseTask
+                    "Recursive loop does not retain memory per message"
+                    (fun () ->
+                        task {
+                            let n = 200000
+                            let batch = 100
+                            let count = ref 0
+
+                            use mb =
+                                new TaskMailboxProcessor<int>(fun inbox ->
+                                    let rec loop () =
+                                        mailbox {
+                                            let! (_: int) = inbox.Receive()
+
+                                            Interlocked.Increment(&count.contents)
+                                            |> ignore
+
+                                            return! loop ()
+                                        }
+
+                                    loop ()
+                                )
+
+                            mb.Start()
+
+                            let postBatch start =
+                                for i in
+                                    start .. start
+                                             + batch
+                                             - 1 do
+                                    mb.Post i
+
+                                let reachedBatch =
+                                    SpinWait.SpinUntil(
+                                        (fun () ->
+                                            Volatile.Read(&count.contents) = start
+                                                                             + batch
+                                        ),
+                                        waitTime
+                                    )
+
+                                Expect.isTrue reachedBatch "Should process the batch"
+
+                            postBatch 0
+                            let before = GC.GetTotalMemory true
+
+                            for start in batch..batch .. n - 1 do
+                                postBatch start
+
+                            let retained =
+                                GC.GetTotalMemory true
+                                - before
+
+                            Expect.isLessThan
+                                retained
+                                (int64 n
+                                 * 20L)
+                                $"Should not retain memory per message, retained {retained} bytes"
+                        }
+                    )
+                |> testSequenced
             ]
         ]

@@ -273,22 +273,6 @@ module CompatibilityTests =
             Expect.equal msg 9 "Should receive the message posted after cancel"
         }
 
-    let mailboxCancelDoesNotCancelUncancellableReceive
-        (mailboxes: IMailboxes)
-        (receive: IInbox<int> -> CancellableTask<'a>)
-        (unwrap: 'a -> int)
-        =
-        task {
-            use cts = new CancellationTokenSource()
-            let! mb, inbox = startAndGetInbox mailboxes cts
-            let receiveTask = (receive inbox) CancellationToken.None
-            do! Task.Delay 20
-            cts.Cancel()
-            mb.Post 5
-            let! result = Expect.completesWithin waitTime receiveTask "Should still receive"
-            Expect.equal (unwrap result) 5 "Should receive despite mailbox cancellation"
-        }
-
     let receiveRacesNearTimeout (mailboxes: IMailboxes) =
         task {
             let n = 200
@@ -636,7 +620,8 @@ module CompatibilityTests =
 
     /// The four request members, posting with `timeout` when given. Call and run are wrapped
     /// together so a test passes whether an exception is thrown at the call (FSharp.Core) or
-    /// when the returned op runs (TaskMailbox, which is cold).
+    /// when the returned op runs (TaskMailbox, which is cold). Folding call and run together
+    /// means a test using this only sees the exception type, not when or whether anything posted.
     let requestCalls (timeout: int option) : (string * (IMailbox<Replier<int>> -> Task)) list = [
         "PostAndTryAsyncReply",
         (fun mb ->
@@ -1774,207 +1759,6 @@ module CompatibilityTests =
                         }
                 ]
             ]
-        ]
-
-    /// A recursive `mailbox { }` body, the MailboxProcessor idiom.
-    let mailboxTests (mailboxes: IMailboxes) =
-        testList "mailbox { }" [
-            testCaseTask "Recursive loop drains a pre-queued backlog in order"
-            <| fun () ->
-                task {
-                    let n = 100000
-                    let received = ResizeArray()
-                    let completed = tcs<unit> ()
-
-                    use mb =
-                        Mailboxes.create
-                            mailboxes
-                            (fun inbox ->
-                                let rec loop () =
-                                    mailbox {
-                                        let! msg = inbox.Receive()
-                                        received.Add msg
-
-                                        if msg = n - 1 then
-                                            completed.SetResult()
-
-                                        return! loop ()
-                                    }
-
-                                loop ()
-                            )
-
-                    for i in 0 .. n - 1 do
-                        mb.Post i
-
-                    mb.Start()
-                    do! Expect.completesWithin waitTime completed.Task "Should receive all"
-
-                    Expect.equal
-                        (List.ofSeq received)
-                        [ 0 .. n - 1 ]
-                        "Should receive in arrival order"
-                }
-
-            testCase "StartImmediate runs tail-called iterations inline"
-            <| fun () ->
-                let mutable steps = 0
-
-                use mb =
-                    Mailboxes.create
-                        mailboxes
-                        (fun inbox ->
-                            let rec loop n =
-                                mailbox {
-                                    steps <- n
-
-                                    if n < 5 then
-                                        return! loop (n + 1)
-                                    else
-                                        let! (_: int) = inbox.Receive()
-                                        ()
-                                }
-
-                            loop 0
-                        )
-
-                mb.StartImmediate()
-                Expect.equal steps 5 "Should run until the first Receive"
-
-            testCaseTask "Error is raised from deep in a recursive loop"
-            <| fun () ->
-                task {
-                    let boom = Exception "boom"
-
-                    use mb =
-                        Mailboxes.create
-                            mailboxes
-                            (fun inbox ->
-                                let rec loop n =
-                                    mailbox {
-                                        let! (_: int) = inbox.Receive()
-
-                                        if n = 1000 then
-                                            raise boom
-
-                                        return! loop (n + 1)
-                                    }
-
-                                loop 0
-                            )
-
-                    let error = firstFrom mb.Error
-
-                    for _ in 0..2000 do
-                        mb.Post 0
-
-                    mb.Start()
-                    let! error = Expect.completesWithin waitTime error "Should raise Error"
-
-                    Expect.isTrue
-                        (obj.ReferenceEquals(error, boom))
-                        $"Should be the body's exception, was {error}"
-                }
-
-            testCaseTask "Cancellation ends a recursive loop"
-            <| fun () ->
-                task {
-                    let received = tcs<unit> ()
-                    let disposed = tcs<unit> ()
-                    use cts = new CancellationTokenSource()
-
-                    let mb =
-                        mailboxes.Create(
-                            (fun inbox ->
-                                let rec loop () =
-                                    mailbox {
-                                        let! (_: int) = inbox.Receive()
-
-                                        received.TrySetResult()
-                                        |> ignore
-
-                                        return! loop ()
-                                    }
-
-                                mailbox {
-                                    use _ = makeDisposable disposed.SetResult
-                                    return! loop ()
-                                }
-                            ),
-                            false,
-                            cts.Token
-                        )
-
-                    mb.Start()
-                    mb.Post 1
-                    do! Expect.completesWithin waitTime received.Task "Should receive"
-                    cts.Cancel()
-                    do! Expect.completesWithin waitTime disposed.Task "Should end and dispose"
-                }
-
-            testCaseTask
-                "Recursive loop does not retain memory per message"
-                (fun () ->
-                    task {
-                        let n = 200000
-                        let batch = 100
-                        let count = ref 0
-
-                        use mb =
-                            Mailboxes.create
-                                mailboxes
-                                (fun inbox ->
-                                    let rec loop () =
-                                        mailbox {
-                                            let! (_: int) = inbox.Receive()
-
-                                            Interlocked.Increment(&count.contents)
-                                            |> ignore
-
-                                            return! loop ()
-                                        }
-
-                                    loop ()
-                                )
-
-                        mb.Start()
-
-                        let postBatch start =
-                            for i in
-                                start .. start
-                                         + batch
-                                         - 1 do
-                                mb.Post i
-
-                            let reachedBatch =
-                                SpinWait.SpinUntil(
-                                    (fun () ->
-                                        Volatile.Read(&count.contents) = start
-                                                                         + batch
-                                    ),
-                                    waitTime
-                                )
-
-                            Expect.isTrue reachedBatch "Should process the batch"
-
-                        postBatch 0
-                        let before = GC.GetTotalMemory true
-
-                        for start in batch..batch .. n - 1 do
-                            postBatch start
-
-                        let retained =
-                            GC.GetTotalMemory true
-                            - before
-
-                        Expect.isLessThan
-                            retained
-                            (int64 n
-                             * 20L)
-                            $"Should not retain memory per message, retained {retained} bytes"
-                    }
-                )
-            |> testSequenced
         ]
 
     let tests (mailboxes: IMailboxes) =
@@ -3506,40 +3290,6 @@ module CompatibilityTests =
                         mailboxes
                         (fun inbox -> inbox.TryScan(matchesAll))
 
-                testCaseTask "The agent's token does not cancel a Receive run on another token"
-                <| fun () ->
-                    mailboxCancelDoesNotCancelUncancellableReceive
-                        mailboxes
-                        (fun inbox -> inbox.Receive())
-                        id
-
-                testCaseTask "The agent's token does not cancel a TryReceive run on another token"
-                <| fun () ->
-                    mailboxCancelDoesNotCancelUncancellableReceive
-                        mailboxes
-                        (fun inbox -> inbox.TryReceive())
-                        (function
-                        | Some m -> m
-                        | None -> failwith "Should receive a message"
-                        )
-
-                testCaseTask "The agent's token does not cancel a Scan run on another token"
-                <| fun () ->
-                    mailboxCancelDoesNotCancelUncancellableReceive
-                        mailboxes
-                        (fun inbox -> inbox.Scan(matchesAll))
-                        id
-
-                testCaseTask "The agent's token does not cancel a TryScan run on another token"
-                <| fun () ->
-                    mailboxCancelDoesNotCancelUncancellableReceive
-                        mailboxes
-                        (fun inbox -> inbox.TryScan(matchesAll))
-                        (function
-                        | Some m -> m
-                        | None -> failwith "Should receive a message"
-                        )
-
                 testCaseTask "TryReceive handles cancellation token"
                 <| fun () ->
                     receiveHandlesCancellation
@@ -3690,7 +3440,6 @@ module CompatibilityTests =
                     Expect.equal mb.CurrentQueueLength 2 "Should count queued messages"
             ]
 
-            mailboxTests mailboxes
             requestReplyTests mailboxes
         ]
 

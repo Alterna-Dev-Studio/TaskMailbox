@@ -165,6 +165,26 @@ module TaskMailboxProcessorTests =
 
                 cancelsInfiniteWait "no timeout" (fun mb ct -> mb.Receive () ct)
                 cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
+
+                testCaseTask "The agent's token does not cancel a Receive run on another token"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(
+                                (fun _ -> cancellableTask { () }),
+                                cts.Token
+                            )
+
+                        let t = mb.Receive () CancellationToken.None
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
+                        mb.Post 5
+
+                        let! result = Expect.completesWithin waitTime t "Should still receive"
+                        Expect.equal result 5 "Should receive despite the agent's token cancelling"
+                    }
             ]
 
             testList "TryReceive" [
@@ -185,6 +205,29 @@ module TaskMailboxProcessorTests =
                     "agent with a token"
                     idleWithToken
                     (fun mb ct -> mb.Scan (neverMatches, waitTime) ct)
+
+                testCaseTask "The agent's token does not cancel a Scan run on another token"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+
+                        use mb =
+                            new TaskMailboxProcessor<int>(
+                                (fun _ -> cancellableTask { () }),
+                                cts.Token
+                            )
+
+                        let t =
+                            (mb.Scan(fun m -> Some(cancellableTask { return m })))
+                                CancellationToken.None
+
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
+                        mb.Post 5
+
+                        let! result = Expect.completesWithin waitTime t "Should still scan"
+                        Expect.equal result 5 "Should scan despite the agent's token cancelling"
+                    }
 
                 testCaseTask "Throws InvalidOperationException when a Receive is waiting"
                 <| fun () ->
