@@ -73,6 +73,16 @@ See [Choosing TaskMailbox](docsSrc/Explanations/Choosing-TaskMailbox.md) for how
 
 ---
 
+### Benchmarks
+
+```sh
+dotnet run -c Release --project benchmarks/FSharpBenchmarks -f net10.0 -- --filter '*'
+```
+
+This runs every benchmark against `MailboxProcessor` and a bare `Channel` on .NET 8.0 and .NET 10.0. Add `--quick` for a single-run smoke check on the host runtime. Results land in `benchmarks/FSharpBenchmarks/BenchmarkDotNet.Artifacts/results/`. See [Performance baseline](docsSrc/Explanations/Performance.md) for the recorded baseline and its caveats.
+
+---
+
 ### Developing
 
 Install the [.NET SDK](https://dotnet.microsoft.com/download) version that `global.json` specifies. The tests also run on .NET 8.0, so install that runtime too.
