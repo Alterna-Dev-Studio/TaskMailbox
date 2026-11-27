@@ -12,6 +12,7 @@
     <Compile Include="Config.fs" />
     <Compile Include="Agents.fs" />
     <Compile Include="PostReceiveBenchmarks.fs" />
+    <Compile Include="ThroughputBenchmarks.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
