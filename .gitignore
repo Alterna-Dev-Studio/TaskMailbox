@@ -277,3 +277,7 @@ temp/
 /docs/
 
 
+
+# BenchmarkDotNet: commit only *-report-github.md and *-report-full-compressed.json
+benchmarks/**/BenchmarkDotNet.Artifacts/results/*-report.html
+benchmarks/**/BenchmarkDotNet.Artifacts/results/*-report.csv
