@@ -9,6 +9,9 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="Config.fs" />
+    <Compile Include="Agents.fs" />
+    <Compile Include="PostReceiveBenchmarks.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>
