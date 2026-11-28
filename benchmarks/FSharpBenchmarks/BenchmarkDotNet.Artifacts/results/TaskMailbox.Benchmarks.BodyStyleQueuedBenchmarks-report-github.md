@@ -11,14 +11,14 @@ InvocationCount=1  IterationCount=20  UnrollFactor=1
 WarmupCount=3  Categories=BodyStyle.Queued  
 
 ```
-| Method                    | Runtime   | Mean     | Error   | StdDev  | P99         | P50      | P95      | Op/s        | Ratio | RatioSD | Gen0   | Allocated | Alloc Ratio |
-|-------------------------- |---------- |---------:|--------:|--------:|------------:|---------:|---------:|------------:|------:|--------:|-------:|----------:|------------:|
-| MailboxProcessorRecursive | .NET 10.0 | 138.3 ns | 2.82 ns | 3.02 ns | 144.7011 ns | 137.6 ns | 144.6 ns | 7,232,589.9 |  1.00 |    0.03 | 0.0650 |     545 B |        1.00 |
-| MailboxProcessorWhile     | .NET 10.0 | 131.1 ns | 2.06 ns | 2.38 ns | 135.9848 ns | 130.6 ns | 135.2 ns | 7,626,388.2 |  0.95 |    0.03 | 0.0560 |     473 B |        0.87 |
-| TaskMailboxWhile          | .NET 10.0 | 210.8 ns | 2.17 ns | 2.23 ns | 215.8281 ns | 210.3 ns | 214.9 ns | 4,742,788.1 |  1.53 |    0.04 | 0.0410 |     344 B |        0.63 |
-| TaskMailboxRecursive      | .NET 10.0 | 145.5 ns | 1.35 ns | 1.33 ns | 147.3545 ns | 145.6 ns | 147.2 ns | 6,871,024.4 |  1.05 |    0.02 | 0.0630 |     528 B |        0.97 |
-|                           |           |          |         |         |             |          |          |             |       |         |        |           |             |
-| MailboxProcessorRecursive | .NET 8.0  | 163.2 ns | 3.72 ns | 4.14 ns | 171.8461 ns | 162.5 ns | 170.9 ns | 6,127,851.4 |  1.00 |    0.03 | 0.0680 |     569 B |        1.00 |
-| MailboxProcessorWhile     | .NET 8.0  | 154.1 ns | 2.35 ns | 2.71 ns | 159.9393 ns | 153.0 ns | 159.3 ns | 6,489,961.3 |  0.94 |    0.03 | 0.0590 |     497 B |        0.87 |
-| TaskMailboxWhile          | .NET 8.0  | 150.2 ns | 1.62 ns | 1.66 ns | 152.6554 ns | 150.1 ns | 152.1 ns | 6,657,266.9 |  0.92 |    0.02 | 0.0460 |     392 B |        0.69 |
-| TaskMailboxRecursive      | .NET 8.0  | 221.8 ns | 2.97 ns | 3.42 ns | 227.9874 ns | 220.6 ns | 227.1 ns | 4,509,108.5 |  1.36 |    0.04 | 0.0680 |     576 B |        1.01 |
+| Method                    | Runtime   | Mean      | Error    | StdDev   | P99         | P50       | P95       | Op/s         | Ratio | RatioSD | Gen0   | Allocated | Alloc Ratio |
+|-------------------------- |---------- |----------:|---------:|---------:|------------:|----------:|----------:|-------------:|------:|--------:|-------:|----------:|------------:|
+| MailboxProcessorRecursive | .NET 10.0 | 129.79 ns | 2.433 ns | 2.603 ns | 135.2593 ns | 128.77 ns | 134.45 ns |  7,705,048.3 |  1.00 |    0.03 | 0.0650 |     545 B |        1.00 |
+| MailboxProcessorWhile     | .NET 10.0 | 131.07 ns | 2.114 ns | 2.434 ns | 135.4149 ns | 130.82 ns | 133.95 ns |  7,629,462.9 |  1.01 |    0.03 | 0.0560 |     473 B |        0.87 |
+| TaskMailboxWhile          | .NET 10.0 |  49.75 ns | 1.042 ns | 1.158 ns |  52.2407 ns |  49.69 ns |  51.32 ns | 20,100,804.2 |  0.38 |    0.01 | 0.0150 |     128 B |        0.23 |
+| TaskMailboxRecursive      | .NET 10.0 |  87.99 ns | 1.616 ns | 1.861 ns |  92.1237 ns |  87.42 ns |  92.04 ns | 11,364,446.1 |  0.68 |    0.02 | 0.0370 |     312 B |        0.57 |
+|                           |           |           |          |          |             |           |           |              |       |         |        |           |             |
+| MailboxProcessorRecursive | .NET 8.0  | 160.31 ns | 3.075 ns | 3.290 ns | 167.4026 ns | 160.47 ns | 167.07 ns |  6,237,829.7 |  1.00 |    0.03 | 0.0680 |     569 B |        1.00 |
+| MailboxProcessorWhile     | .NET 8.0  | 152.28 ns | 2.349 ns | 2.412 ns | 156.6020 ns | 151.14 ns | 155.86 ns |  6,566,891.0 |  0.95 |    0.02 | 0.0590 |     497 B |        0.87 |
+| TaskMailboxWhile          | .NET 8.0  |  60.07 ns | 1.016 ns | 1.043 ns |  61.7228 ns |  60.34 ns |  61.70 ns | 16,648,083.8 |  0.37 |    0.01 | 0.0180 |     152 B |        0.27 |
+| TaskMailboxRecursive      | .NET 8.0  | 125.91 ns | 1.282 ns | 1.317 ns | 128.0778 ns | 126.00 ns | 127.54 ns |  7,942,100.4 |  0.79 |    0.02 | 0.0400 |     336 B |        0.59 |

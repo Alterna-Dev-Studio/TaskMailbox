@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TaskReplyChannel<'Reply>` and `PostAndReply`, `TryPostAndReply`, `PostAndAsyncReply`, `PostAndTryAsyncReply` for request/reply
 
 ### Changed
+- Faster `Receive`/`TryReceive` on a non-empty queue; cheaper cancellation and timeout
 - `StartImmediate` no longer resumes the body on the caller's `SynchronizationContext`
 
 ### Fixed
