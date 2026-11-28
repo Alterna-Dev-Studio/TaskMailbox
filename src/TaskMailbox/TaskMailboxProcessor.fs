@@ -96,12 +96,22 @@ type TaskMailboxProcessor<'Msg>
             ValueSome msg
         | _ -> ValueNone
 
-    // A disposed mailbox never yields a message; the wait ends only by cancellation
+    // One tokenless channel wait, kept across cancelled Receives; touched only under the `receiving` guard
+    let mutable pendingWait: Task<bool> = null
+
+    // A disposed mailbox never yields a message; the wait ends only by cancellation.
+    // WaitAsync cancels without throwing, unlike a cancelled channel wait whose AsTask throws inside the BCL.
     let waitForArrival (ct: CancellationToken) : Task =
         if isDisposed () then
             Task.Delay(Timeout.Infinite, ct)
         else
-            arrivals.Reader.WaitToReadAsync(ct).AsTask()
+            if
+                isNull pendingWait
+                || pendingWait.IsCompleted
+            then
+                pendingWait <- arrivals.Reader.WaitToReadAsync().AsTask()
+
+            pendingWait.WaitAsync ct
 
     // The wait is awaited with SuppressThrowing so a cancelled wait is not rethrown at each layer:
     // readAsync and waitForMatch return ValueNone on cancellation and the caller throws once.
@@ -122,6 +132,10 @@ type TaskMailboxProcessor<'Msg>
                     let wait = waitForArrival ct
                     do! wait.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing)
                     cancelled <- wait.IsCanceled
+
+                    // WaitAsync completes inline in Cancel(); resume on the thread pool instead
+                    if cancelled then
+                        do! Task.Yield()
 
             return result
         }
@@ -214,7 +228,10 @@ type TaskMailboxProcessor<'Msg>
                 do! wait.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing)
                 cancelled <- wait.IsCanceled
 
-                if not cancelled then
+                // WaitAsync completes inline in Cancel(); resume on the thread pool instead
+                if cancelled then
+                    do! Task.Yield()
+                else
                     found <- scanArrivals scanner
 
             return found

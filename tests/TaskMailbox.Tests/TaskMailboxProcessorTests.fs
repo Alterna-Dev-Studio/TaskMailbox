@@ -45,6 +45,67 @@ module TaskMailboxProcessorTests =
                         "Should cancel an infinite wait"
             }
 
+    /// TaskMailbox-only: the wait is cancelled inline by the canceller's Cancel(); the call must
+    /// hop to the thread pool rather than resume its caller there.
+    let resumesOffCancellerThread
+        name
+        (call: TaskMailboxProcessor<int> -> CancellationToken -> Task<'T>)
+        =
+        testCaseTask $"A cancelled {name} does not resume on the canceller's thread"
+        <| fun () ->
+            task {
+                for _ in 1..5 do
+                    use mb = idle ()
+                    use cts = new CancellationTokenSource()
+                    let mutable resumedOn = -1
+
+                    let t =
+                        task {
+                            try
+                                let! _ = call mb cts.Token
+                                ()
+                            with :? OperationCanceledException ->
+                                resumedOn <- Thread.CurrentThread.ManagedThreadId
+                        }
+
+                    Expect.isFalse t.IsCompleted "Should be waiting"
+                    let mutable cancellerOn = -1
+
+                    let canceller =
+                        Thread(fun () ->
+                            cancellerOn <- Thread.CurrentThread.ManagedThreadId
+                            cts.Cancel()
+                        )
+
+                    canceller.Start()
+                    canceller.Join()
+                    do! Expect.completesWithin waitTime t "Should cancel"
+                    Expect.notEqual resumedOn -1 "Should resume after the cancellation"
+                    Expect.notEqual resumedOn cancellerOn "Should resume off the canceller's thread"
+            }
+
+    /// TaskMailbox-only: a wait that completed for one delivery must not satisfy the next call.
+    let waitsAgainAfterDelivery
+        name
+        (call: TaskMailboxProcessor<int> -> CancellationToken -> Task<int>)
+        =
+        testCaseTask $"A {name} after a delivered {name} waits for the next message"
+        <| fun () ->
+            task {
+                use mb = idle ()
+                use cts = new CancellationTokenSource()
+                let first = call mb cts.Token
+                Expect.isFalse first.IsCompleted "Should be waiting"
+                mb.Post 1
+                let! one = Expect.completesWithin waitTime first "Should deliver the first"
+                Expect.equal one 1 "Should get the first message"
+                let second = call mb cts.Token
+                Expect.isFalse second.IsCompleted "Should wait for the next message"
+                mb.Post 2
+                let! two = Expect.completesWithin waitTime second "Should deliver the second"
+                Expect.equal two 2 "Should get the second message"
+            }
+
     [<Tests>]
     let taskMailboxProcessorTests =
         testList "TaskMailboxProcessor" [
@@ -111,6 +172,10 @@ module TaskMailboxProcessorTests =
                     }
 
                 cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
+
+                resumesOffCancellerThread "Receive" (fun mb ct -> mb.Receive () ct)
+
+                waitsAgainAfterDelivery "Receive" (fun mb ct -> mb.Receive () ct)
 
                 testCaseTask
                     "Faults the task, rather than throwing when run, on a timeout 0 Receive of an empty mailbox"
@@ -206,6 +271,12 @@ module TaskMailboxProcessorTests =
             ]
 
             testList "Scan" [
+                resumesOffCancellerThread "Scan" (fun mb ct -> (mb.Scan neverMatches) ct)
+
+                waitsAgainAfterDelivery
+                    "Scan"
+                    (fun mb ct -> (mb.Scan(fun m -> Some(cancellableTask { return m }))) ct)
+
                 testCaseTask
                     "The exception from a cancelled infinite Scan carries the caller's token"
                 <| fun () ->
