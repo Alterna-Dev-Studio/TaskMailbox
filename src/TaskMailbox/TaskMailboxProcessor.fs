@@ -64,6 +64,51 @@ type internal ReceiveWaiter<'Msg, 'R>
 
         waiter.Task
 
+/// Runs a Scan's computation once its search ends, cancelling without a throw when the caller cancelled.
+module internal Relay =
+
+    let scan
+        (find: Task<struct ('C voption * bool)>)
+        (ct: CancellationToken)
+        (next: 'C voption -> Task<'R>)
+        : Task<'R> =
+        let step (find: Task<struct ('C voption * bool)>) =
+            if find.IsCompletedSuccessfully then
+                let struct (found, cancelled) = find.Result
+
+                // A match found as the caller cancels is dropped unrun
+                if
+                    cancelled
+                    || (found.IsSome
+                        && ct.IsCancellationRequested)
+                then
+                    Task.FromCanceled<'R> ct
+                else
+                    try
+                        next found
+                    with e ->
+                        Task.FromException<'R> e
+            elif find.IsCanceled then
+                // The scanner raised OperationCanceledException: await rethrows it, so the builder cancels with its token
+                task {
+                    let! _ = find
+                    return Unchecked.defaultof<'R>
+                }
+            else
+                Task.FromException<'R> find.Exception.InnerException
+
+        if find.IsCompleted then
+            step find
+        else
+            find
+                .ContinueWith(
+                    Func<_, _>(step),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default
+                )
+                .Unwrap()
+
 /// <summary>
 /// A message-processing agent that runs a <see cref='T:IcedTasks.CancellableTasks.CancellableTask`1'/> body.
 /// A task-native equivalent of <see cref='T:Microsoft.FSharp.Control.FSharpMailboxProcessor`1'/>.
@@ -297,54 +342,45 @@ type TaskMailboxProcessor<'Msg>
             return found
         }
 
-    let tryScan
+    // The search phase of Scan/TryScan: the matched computation and whether the caller cancelled. Never throws on cancel.
+    let findMatch
         (scanner: 'Msg -> CancellableTask<'T> option)
         (timeout: int)
-        : CancellableTask<'T voption> =
+        : CancellableTask<struct (CancellableTask<'T> voption * bool)> =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
+            enterReader ()
 
-            let! found =
-                cancellableTask {
-                    enterReader ()
+            try
+                if isDisposed () then
+                    skipped.Clear()
 
-                    try
-                        if isDisposed () then
-                            skipped.Clear()
+                match scanSkipped scanner with
+                | ValueSome _ as found -> return struct (found, false)
+                | ValueNone ->
+                    match scanArrivals scanner with
+                    | ValueSome _ as found -> return struct (found, false)
+                    | ValueNone when timeout = 0 -> return struct (ValueNone, false)
+                    // As FSharp.Core's scanNoTimeout: any negative timeout waits indefinitely, even with a token
+                    | ValueNone when timeout < 0 ->
+                        let! found = waitForMatch scanner ct
 
-                        match scanSkipped scanner with
-                        | ValueSome _ as found -> return found
-                        | ValueNone ->
-                            match scanArrivals scanner with
-                            | ValueSome _ as found -> return found
-                            | ValueNone when timeout = 0 -> return ValueNone
-                            // As FSharp.Core's scanNoTimeout: any negative timeout waits indefinitely, even with a token
-                            | ValueNone when timeout < 0 ->
-                                let! found = waitForMatch scanner ct
+                        return
+                            struct (found,
+                                    found.IsNone
+                                    && ct.IsCancellationRequested)
+                    | ValueNone ->
+                        use timeoutCts = CancellationTokenSource.CreateLinkedTokenSource ct
+                        timeoutCts.CancelAfter timeout
 
-                                if found.IsNone then
-                                    ct.ThrowIfCancellationRequested()
-
-                                return found
-                            | ValueNone ->
-                                use timeoutCts = CancellationTokenSource.CreateLinkedTokenSource ct
-                                timeoutCts.CancelAfter timeout
-
-                                let! found = waitForMatch scanner timeoutCts.Token
-                                // Cancelled by the caller's token: throw; by the timeout: no match
-                                if found.IsNone then
-                                    ct.ThrowIfCancellationRequested()
-
-                                return found
-                    finally
-                        exitReader ()
-                }
-
-            match found with
-            | ValueSome computation ->
-                let! result = computation
-                return ValueSome result
-            | ValueNone -> return ValueNone
+                        let! found = waitForMatch scanner timeoutCts.Token
+                        // Cancelled by the caller's token: cancel; by the timeout: no match
+                        return
+                            struct (found,
+                                    found.IsNone
+                                    && ct.IsCancellationRequested)
+            finally
+                exitReader ()
         }
 
     /// <summary>Creates an agent. The body does not run until <c>Start</c> or <c>StartImmediate</c>.</summary>
@@ -581,11 +617,15 @@ type TaskMailboxProcessor<'Msg>
         : CancellableTask<'T> =
         let timeout = defaultArg timeout defaultTimeout
 
-        cancellableTask {
-            match! tryScan scanner timeout with
-            | ValueSome result -> return result
-            | ValueNone -> return raise (scanTimedOut ())
-        }
+        fun ct ->
+            Relay.scan
+                (findMatch scanner timeout ct)
+                ct
+                (fun found ->
+                    match found with
+                    | ValueSome computation -> computation ct
+                    | ValueNone -> Task.FromException<'T>(scanTimedOut ())
+                )
 
     /// <summary>Like <c>Scan</c>, but returns <c>None</c> when the timeout elapses.</summary>
     /// <param name="scanner">Returns the computation to run for an accepted message, or <c>None</c> to skip it and keep waiting.</param>
@@ -598,11 +638,20 @@ type TaskMailboxProcessor<'Msg>
         : CancellableTask<'T option> =
         let timeout = defaultArg timeout defaultTimeout
 
-        cancellableTask {
-            match! tryScan scanner timeout with
-            | ValueSome result -> return Some result
-            | ValueNone -> return None
-        }
+        fun ct ->
+            Relay.scan
+                (findMatch scanner timeout ct)
+                ct
+                (fun found ->
+                    match found with
+                    | ValueSome computation ->
+                        (cancellableTask {
+                            let! result = computation
+                            return Some result
+                        })
+                            ct
+                    | ValueNone -> Task.FromResult None
+                )
 
     /// <summary>Posts a request and asynchronously waits for its reply, like <c>PostAndAsyncReply</c>
     /// but returning <c>None</c> instead of throwing when the timeout elapses.</summary>
