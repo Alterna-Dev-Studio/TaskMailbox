@@ -2116,6 +2116,35 @@ module CompatibilityTests =
                         Expect.equal inbox.CurrentQueueLength 2 "Should count the skipped messages"
                     }
 
+                testCaseTask "Receiving a skipped message decrements CurrentQueueLength"
+                <| fun () ->
+                    task {
+                        use cts = new CancellationTokenSource()
+                        let! mb, inbox = startAndGetInbox mailboxes cts
+
+                        mb.Post 1
+                        mb.Post 2
+                        mb.Post 3
+
+                        let! _ =
+                            Expect.completesWithin
+                                waitTime
+                                ((inbox.Scan(fun m ->
+                                    if m = 3 then Some(cancellableTask { return m }) else None
+                                ))
+                                    CancellationToken.None)
+                                "Should scan"
+
+                        let! received =
+                            Expect.completesWithin
+                                waitTime
+                                (inbox.Receive () CancellationToken.None)
+                                "Should receive"
+
+                        Expect.equal received 1 "Should receive the first skipped message"
+                        Expect.equal inbox.CurrentQueueLength 1 "Should count one message left"
+                    }
+
                 testCaseTask "A Scan computation can Receive"
                 <| fun () ->
                     task {

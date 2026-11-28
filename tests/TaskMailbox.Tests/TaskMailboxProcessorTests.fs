@@ -50,6 +50,27 @@ module TaskMailboxProcessorTests =
         testList "TaskMailboxProcessor" [
             testList "Receive" [
                 testCaseTask
+                    "The exception from a cancelled infinite Receive carries the caller's token"
+                <| fun () ->
+                    task {
+                        use mb = new TaskMailboxProcessor<int>(fun _ -> cancellableTask { () })
+                        use cts = new CancellationTokenSource()
+                        let t = (task { let! _ = mb.Receive () cts.Token in () })
+                        cts.Cancel()
+
+                        let! token =
+                            task {
+                                try
+                                    do! t
+                                    return CancellationToken.None
+                                with :? OperationCanceledException as e ->
+                                    return e.CancellationToken
+                            }
+
+                        Expect.equal token cts.Token "Should carry the caller's token"
+                    }
+
+                testCaseTask
                     "Throws OperationCanceledException when the caller cancels an infinite wait (no timeout)"
                 <| fun () ->
                     task {
@@ -90,6 +111,20 @@ module TaskMailboxProcessorTests =
                     }
 
                 cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
+
+                testCaseTask
+                    "Faults the task, rather than throwing when run, on a timeout 0 Receive of an empty mailbox"
+                <| fun () ->
+                    task {
+                        use mb = idle ()
+                        let t = mb.Receive 0 CancellationToken.None
+                        Expect.isTrue t.IsFaulted "Should fault the returned task"
+
+                        do!
+                            Expect.throwsTaskT<TimeoutException>
+                                (fun () -> t :> Task)
+                                "Should time out"
+                    }
 
                 testCaseTask "The agent's token does not cancel a Receive run on another token"
                 <| fun () ->
@@ -171,6 +206,27 @@ module TaskMailboxProcessorTests =
             ]
 
             testList "Scan" [
+                testCaseTask
+                    "The exception from a cancelled infinite Scan carries the caller's token"
+                <| fun () ->
+                    task {
+                        use mb = new TaskMailboxProcessor<int>(fun _ -> cancellableTask { () })
+                        use cts = new CancellationTokenSource()
+                        let t = (task { let! _ = (mb.Scan neverMatches) cts.Token in () })
+                        cts.Cancel()
+
+                        let! token =
+                            task {
+                                try
+                                    do! t
+                                    return CancellationToken.None
+                                with :? OperationCanceledException as e ->
+                                    return e.CancellationToken
+                            }
+
+                        Expect.equal token cts.Token "Should carry the caller's token"
+                    }
+
                 testCaseTask
                     "Throws OperationCanceledException when the caller cancels an infinite wait (no timeout)"
                 <| fun () ->
