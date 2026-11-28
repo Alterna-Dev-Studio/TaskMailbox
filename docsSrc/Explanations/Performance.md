@@ -81,6 +81,16 @@ The body-style benchmarks compare a recursive body (`mailbox { }` for `TaskMailb
 
 The `MailboxProcessor` styles are within 1.06 of each other in the queued rows and within 1.15 in the throughput rows, where the `RatioSD` is 0.30 or more. The `TaskMailbox` styles differ by more, and in different directions on the two runtimes: `while` is faster on .NET 8.0 and recursive is faster on .NET 10.0, in both the queued and the throughput row.
 
+## Channel options
+
+`TaskMailboxProcessor` keeps `AllowSynchronousContinuations = false` on the arrivals channel. A prototype measurement of `true` (2026-11-27, same machine and BenchmarkDotNet config as the baseline; a prototype, not a committed benchmark):
+
+- Post and wake went from 2.19 to 0.78 μs, and reply from 2.75 to 0.91 μs.
+- Throughput was not better: 1 producer 247 to 348 ns (SD 270) on .NET 10.0, 4 producers 239 to 332 ns on .NET 8.0. Allocation rose from 348 to 1,080 B per message.
+- The tests `Receive Races with Post` (and on .NET 8.0 also `Receive Races with Post on timeout`) fail: `Post` runs the agent body inline on the producer's thread, and a blocking body deadlocks the producer.
+
+`MailboxProcessor`'s `Post` always queues the reader to the thread pool, so `true` would be a new intentional difference.
+
 ## Caveats
 
 - One run on one machine on a laptop. BenchmarkDotNet reported `Failed to set up high priority`.
