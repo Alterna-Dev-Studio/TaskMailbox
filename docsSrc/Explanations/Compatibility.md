@@ -16,7 +16,7 @@ FSharp.Core's `MailboxProcessor` is the specification. `tests/TaskMailbox.Tests/
 - `Receive` returns messages in arrival order. `-1` waits indefinitely, `0` checks the queue once, and an elapsed timeout throws `TimeoutException` without losing a later message. `TryReceive` returns `None` instead of throwing.
 - A timeout below `-1` also waits indefinitely, except on an agent created with a token, where an empty queue throws `ArgumentOutOfRangeException`.
 - `DefaultTimeout` is read when `Receive`, `TryReceive`, `Scan`, `TryScan`, or a `PostAnd*Reply` method is called, not when it runs.
-- Cancelling the caller's token throws `OperationCanceledException`, not a timeout or `None`, and takes no message. See Intentional differences for an infinite wait on an agent created without a token, and for a `Scan`/`TryScan` with a finite timeout.
+- Cancelling the caller's token throws `OperationCanceledException` carrying the caller's token, not a timeout or `None`, and takes no message. See Intentional differences for an infinite wait on an agent created without a token, and for a `Scan`/`TryScan` with a finite timeout.
 - `Scan` and `TryScan` test skipped messages, then arrivals, in that order. A rejected message stays skipped for the next reader; `Receive` and `TryReceive` take skipped messages first.
 - A `Scan`/`TryScan` timeout bounds the search, not the matched computation: `TimeoutException` from `Scan`, `None` from `TryScan`, `0` is a single pass, and negative waits indefinitely even with a token, unlike `Receive`.
 - `CurrentQueueLength` counts skipped messages; `Dispose` drops them. The matched message is consumed before its computation runs, which may call `Receive`. A scanner exception on a skipped message leaves it queued.
