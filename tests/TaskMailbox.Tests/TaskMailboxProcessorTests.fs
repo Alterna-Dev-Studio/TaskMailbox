@@ -191,6 +191,102 @@ module TaskMailboxProcessorTests =
                                 "Should time out"
                     }
 
+                testCaseTask
+                    "An already-cancelled Receive or TryReceive is cancelled with the caller's token"
+                <| fun () ->
+                    task {
+                        for name, call in
+                            [
+                                "Receive",
+                                (fun (mb: TaskMailboxProcessor<int>) (ct: CancellationToken) ->
+                                    mb.Receive () ct :> Task
+                                )
+
+                                "TryReceive", (fun mb ct -> mb.TryReceive () ct :> Task)
+                            ] do
+                            use mb = idle ()
+                            use cts = new CancellationTokenSource()
+                            cts.Cancel()
+                            let t = call mb cts.Token
+                            Expect.isTrue t.IsCanceled $"Should be cancelled, not faulted ({name})"
+
+                            let! token =
+                                task {
+                                    try
+                                        do! t
+                                        return CancellationToken.None
+                                    with :? OperationCanceledException as e ->
+                                        return e.CancellationToken
+                                }
+
+                            Expect.equal token cts.Token $"Should carry the caller's token ({name})"
+                    }
+
+                testCaseTask "A Receive cancelled while waiting ends cancelled, not faulted"
+                <| fun () ->
+                    task {
+                        use mb = idle ()
+                        use cts = new CancellationTokenSource()
+                        let t = mb.Receive () cts.Token
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
+
+                        let! _ =
+                            Expect.completesWithin
+                                waitTime
+                                (task {
+                                    try
+                                        let! _ = t
+                                        ()
+                                    with _ ->
+                                        ()
+                                })
+                                "Should end"
+
+                        Expect.isTrue t.IsCanceled "Should be cancelled, not faulted"
+                    }
+
+                testCaseTask "A Receive cancelled as a message arrives never loses the message"
+                <| fun () ->
+                    task {
+                        for i in 1..2000 do
+                            use mb = idle ()
+                            use cts = new CancellationTokenSource()
+                            let t = mb.Receive () cts.Token
+                            use gate = new ManualResetEventSlim()
+
+                            let poster =
+                                Task.Run(fun () ->
+                                    gate.Wait()
+                                    mb.Post i
+                                )
+
+                            let canceller =
+                                Task.Run(fun () ->
+                                    gate.Wait()
+                                    cts.Cancel()
+                                )
+
+                            gate.Set()
+                            do! poster
+                            do! canceller
+
+                            let! received =
+                                task {
+                                    try
+                                        let! msg = t
+                                        return Some msg
+                                    with :? OperationCanceledException ->
+                                        return None
+                                }
+
+                            match received with
+                            | Some msg -> Expect.equal msg i "Should deliver the posted message"
+                            | None ->
+                                let! next = mb.TryReceive 0 CancellationToken.None
+                                Expect.equal next (Some i) "Should leave the message when cancelled"
+                    }
+
                 testCaseTask "The agent's token does not cancel a Receive run on another token"
                 <| fun () ->
                     task {
@@ -213,6 +309,30 @@ module TaskMailboxProcessorTests =
             ]
 
             testList "Reader guard" [
+                testCaseTask "Faults the task, rather than throwing when run, on a second reader"
+                <| fun () ->
+                    task {
+                        use mb = idle ()
+                        let first = mb.Receive () CancellationToken.None
+                        let second = mb.Receive () CancellationToken.None
+                        Expect.isTrue second.IsFaulted "Should fault the returned task"
+
+                        do!
+                            Expect.throwsTaskT<InvalidOperationException>
+                                (fun () -> second :> Task)
+                                "Should reject a second reader"
+
+                        mb.Post 1
+
+                        let! msg =
+                            Expect.completesWithin
+                                waitTime
+                                first
+                                "First reader should still receive"
+
+                        Expect.equal msg 1 "First reader should still receive"
+                    }
+
                 testCaseTask
                     "Throws InvalidOperationException when a second reader is already waiting"
                 <| fun () ->
