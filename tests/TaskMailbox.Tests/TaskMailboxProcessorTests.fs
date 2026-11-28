@@ -45,6 +45,67 @@ module TaskMailboxProcessorTests =
                         "Should cancel an infinite wait"
             }
 
+    /// TaskMailbox-only: the wait is cancelled inline by the canceller's Cancel(); the call must
+    /// hop to the thread pool rather than resume its caller there.
+    let resumesOffCancellerThread
+        name
+        (call: TaskMailboxProcessor<int> -> CancellationToken -> Task<'T>)
+        =
+        testCaseTask $"A cancelled {name} does not resume on the canceller's thread"
+        <| fun () ->
+            task {
+                for _ in 1..5 do
+                    use mb = idle ()
+                    use cts = new CancellationTokenSource()
+                    let mutable resumedOn = -1
+
+                    let t =
+                        task {
+                            try
+                                let! _ = call mb cts.Token
+                                ()
+                            with :? OperationCanceledException ->
+                                resumedOn <- Thread.CurrentThread.ManagedThreadId
+                        }
+
+                    Expect.isFalse t.IsCompleted "Should be waiting"
+                    let mutable cancellerOn = -1
+
+                    let canceller =
+                        Thread(fun () ->
+                            cancellerOn <- Thread.CurrentThread.ManagedThreadId
+                            cts.Cancel()
+                        )
+
+                    canceller.Start()
+                    canceller.Join()
+                    do! Expect.completesWithin waitTime t "Should cancel"
+                    Expect.notEqual resumedOn -1 "Should resume after the cancellation"
+                    Expect.notEqual resumedOn cancellerOn "Should resume off the canceller's thread"
+            }
+
+    /// TaskMailbox-only: a wait that completed for one delivery must not satisfy the next call.
+    let waitsAgainAfterDelivery
+        name
+        (call: TaskMailboxProcessor<int> -> CancellationToken -> Task<int>)
+        =
+        testCaseTask $"A {name} after a delivered {name} waits for the next message"
+        <| fun () ->
+            task {
+                use mb = idle ()
+                use cts = new CancellationTokenSource()
+                let first = call mb cts.Token
+                Expect.isFalse first.IsCompleted "Should be waiting"
+                mb.Post 1
+                let! one = Expect.completesWithin waitTime first "Should deliver the first"
+                Expect.equal one 1 "Should get the first message"
+                let second = call mb cts.Token
+                Expect.isFalse second.IsCompleted "Should wait for the next message"
+                mb.Post 2
+                let! two = Expect.completesWithin waitTime second "Should deliver the second"
+                Expect.equal two 2 "Should get the second message"
+            }
+
     [<Tests>]
     let taskMailboxProcessorTests =
         testList "TaskMailboxProcessor" [
@@ -112,6 +173,10 @@ module TaskMailboxProcessorTests =
 
                 cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
 
+                resumesOffCancellerThread "Receive" (fun mb ct -> mb.Receive () ct)
+
+                waitsAgainAfterDelivery "Receive" (fun mb ct -> mb.Receive () ct)
+
                 testCaseTask
                     "Faults the task, rather than throwing when run, on a timeout 0 Receive of an empty mailbox"
                 <| fun () ->
@@ -124,6 +189,102 @@ module TaskMailboxProcessorTests =
                             Expect.throwsTaskT<TimeoutException>
                                 (fun () -> t :> Task)
                                 "Should time out"
+                    }
+
+                testCaseTask
+                    "An already-cancelled Receive or TryReceive is cancelled with the caller's token"
+                <| fun () ->
+                    task {
+                        for name, call in
+                            [
+                                "Receive",
+                                (fun (mb: TaskMailboxProcessor<int>) (ct: CancellationToken) ->
+                                    mb.Receive () ct :> Task
+                                )
+
+                                "TryReceive", (fun mb ct -> mb.TryReceive () ct :> Task)
+                            ] do
+                            use mb = idle ()
+                            use cts = new CancellationTokenSource()
+                            cts.Cancel()
+                            let t = call mb cts.Token
+                            Expect.isTrue t.IsCanceled $"Should be cancelled, not faulted ({name})"
+
+                            let! token =
+                                task {
+                                    try
+                                        do! t
+                                        return CancellationToken.None
+                                    with :? OperationCanceledException as e ->
+                                        return e.CancellationToken
+                                }
+
+                            Expect.equal token cts.Token $"Should carry the caller's token ({name})"
+                    }
+
+                testCaseTask "A Receive cancelled while waiting ends cancelled, not faulted"
+                <| fun () ->
+                    task {
+                        use mb = idle ()
+                        use cts = new CancellationTokenSource()
+                        let t = mb.Receive () cts.Token
+                        Expect.isFalse t.IsCompleted "Should be waiting"
+                        cts.Cancel()
+
+                        let! _ =
+                            Expect.completesWithin
+                                waitTime
+                                (task {
+                                    try
+                                        let! _ = t
+                                        ()
+                                    with _ ->
+                                        ()
+                                })
+                                "Should end"
+
+                        Expect.isTrue t.IsCanceled "Should be cancelled, not faulted"
+                    }
+
+                testCaseTask "A Receive cancelled as a message arrives never loses the message"
+                <| fun () ->
+                    task {
+                        for i in 1..2000 do
+                            use mb = idle ()
+                            use cts = new CancellationTokenSource()
+                            let t = mb.Receive () cts.Token
+                            use gate = new ManualResetEventSlim()
+
+                            let poster =
+                                Task.Run(fun () ->
+                                    gate.Wait()
+                                    mb.Post i
+                                )
+
+                            let canceller =
+                                Task.Run(fun () ->
+                                    gate.Wait()
+                                    cts.Cancel()
+                                )
+
+                            gate.Set()
+                            do! poster
+                            do! canceller
+
+                            let! received =
+                                task {
+                                    try
+                                        let! msg = t
+                                        return Some msg
+                                    with :? OperationCanceledException ->
+                                        return None
+                                }
+
+                            match received with
+                            | Some msg -> Expect.equal msg i "Should deliver the posted message"
+                            | None ->
+                                let! next = mb.TryReceive 0 CancellationToken.None
+                                Expect.equal next (Some i) "Should leave the message when cancelled"
                     }
 
                 testCaseTask "The agent's token does not cancel a Receive run on another token"
@@ -148,6 +309,30 @@ module TaskMailboxProcessorTests =
             ]
 
             testList "Reader guard" [
+                testCaseTask "Faults the task, rather than throwing when run, on a second reader"
+                <| fun () ->
+                    task {
+                        use mb = idle ()
+                        let first = mb.Receive () CancellationToken.None
+                        let second = mb.Receive () CancellationToken.None
+                        Expect.isTrue second.IsFaulted "Should fault the returned task"
+
+                        do!
+                            Expect.throwsTaskT<InvalidOperationException>
+                                (fun () -> second :> Task)
+                                "Should reject a second reader"
+
+                        mb.Post 1
+
+                        let! msg =
+                            Expect.completesWithin
+                                waitTime
+                                first
+                                "First reader should still receive"
+
+                        Expect.equal msg 1 "First reader should still receive"
+                    }
+
                 testCaseTask
                     "Throws InvalidOperationException when a second reader is already waiting"
                 <| fun () ->
@@ -206,6 +391,12 @@ module TaskMailboxProcessorTests =
             ]
 
             testList "Scan" [
+                resumesOffCancellerThread "Scan" (fun mb ct -> (mb.Scan neverMatches) ct)
+
+                waitsAgainAfterDelivery
+                    "Scan"
+                    (fun mb ct -> (mb.Scan(fun m -> Some(cancellableTask { return m }))) ct)
+
                 testCaseTask
                     "The exception from a cancelled infinite Scan carries the caller's token"
                 <| fun () ->
@@ -388,6 +579,156 @@ module TaskMailboxProcessorTests =
                                 "Should receive"
 
                         Expect.equal r2 2 "Should receive 2"
+                    }
+
+                // TaskMailbox-only: FSharp.Core runs the computation regardless of the token
+                testCaseTask
+                    "A Scan whose match arrives after the caller cancels does not run the computation"
+                <| fun () ->
+                    task {
+                        for name, postFirst, call in
+                            [
+                                "Scan, queued",
+                                true,
+                                (fun (mb: TaskMailboxProcessor<int>) scanner ct ->
+                                    mb.Scan scanner ct :> Task
+                                )
+                                "Scan, waiting",
+                                false,
+                                (fun mb scanner ct -> mb.Scan scanner ct :> Task)
+                                "TryScan, queued",
+                                true,
+                                (fun mb scanner ct -> mb.TryScan scanner ct :> Task)
+                                "TryScan, waiting",
+                                false,
+                                (fun mb scanner ct -> mb.TryScan scanner ct :> Task)
+                            ] do
+                            use mb = idle ()
+                            use cts = new CancellationTokenSource()
+                            let mutable ran = false
+
+                            let scanner m =
+                                cts.Cancel()
+
+                                Some(fun (_: CancellationToken) ->
+                                    ran <- true
+                                    Task.FromResult m
+                                )
+
+                            if postFirst then
+                                mb.Post 1
+
+                            let t = call mb scanner cts.Token
+
+                            if not postFirst then
+                                mb.Post 1
+
+                            let! token =
+                                task {
+                                    try
+                                        do! t
+                                        return CancellationToken.None
+                                    with :? OperationCanceledException as e ->
+                                        return e.CancellationToken
+                                }
+
+                            Expect.equal
+                                token
+                                cts.Token
+                                $"Should cancel with the caller's token ({name})"
+
+                            Expect.isFalse ran $"Should not run the computation ({name})"
+                    }
+
+                testCaseTask "A scanner that throws OperationCanceledException cancels the Scan"
+                <| fun () ->
+                    task {
+                        use scannerCts = new CancellationTokenSource()
+                        scannerCts.Cancel()
+
+                        for name, scannerToken in
+                            [
+                                "its own cancelled token", scannerCts.Token
+                                "no token", CancellationToken.None
+                            ] do
+                            use mb = idle ()
+                            mb.Post 1
+
+                            let t =
+                                mb.Scan
+                                    ((fun _ -> raise (OperationCanceledException scannerToken)), 0)
+                                    CancellationToken.None
+
+                            let! thrown =
+                                task {
+                                    try
+                                        do! t
+                                        return None
+                                    with :? OperationCanceledException as e ->
+                                        return Some e
+                                }
+
+                            Expect.isTrue t.IsCanceled $"Should be cancelled ({name})"
+
+                            Expect.equal
+                                thrown.Value.CancellationToken
+                                scannerToken
+                                $"Should keep the scanner's token ({name})"
+                    }
+
+                testCaseTask "Runs the matched computation with the caller's token"
+                <| fun () ->
+                    task {
+                        for name, call in
+                            [
+                                "Scan",
+                                (fun (mb: TaskMailboxProcessor<int>) scanner ct ->
+                                    mb.Scan scanner ct :> Task
+                                )
+                                "TryScan", (fun mb scanner ct -> mb.TryScan scanner ct :> Task)
+                            ] do
+                            use mb = idle ()
+                            use cts = new CancellationTokenSource()
+                            let mutable seen = CancellationToken.None
+                            mb.Post 1
+
+                            do!
+                                call
+                                    mb
+                                    (fun m ->
+                                        Some(fun (ct: CancellationToken) ->
+                                            seen <- ct
+                                            Task.FromResult m
+                                        )
+                                    )
+                                    cts.Token
+
+                            Expect.equal seen cts.Token $"Should pass the caller's token ({name})"
+                    }
+
+                testCaseTask "A computation that throws faults the Scan rather than throwing"
+                <| fun () ->
+                    task {
+                        for name, call in
+                            [
+                                "Scan",
+                                (fun (mb: TaskMailboxProcessor<int>) scanner ->
+                                    mb.Scan scanner CancellationToken.None :> Task
+                                )
+                                "TryScan",
+                                (fun mb scanner ->
+                                    mb.TryScan scanner CancellationToken.None :> Task
+                                )
+                            ] do
+                            use mb = idle ()
+                            mb.Post 1
+
+                            let t =
+                                call
+                                    mb
+                                    (fun _ -> Some(fun (_: CancellationToken) -> failwith "boom"))
+
+                            Expect.isTrue t.IsFaulted $"Should fault, not throw ({name})"
                     }
             ]
 
