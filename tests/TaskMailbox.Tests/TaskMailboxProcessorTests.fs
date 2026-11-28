@@ -91,6 +91,20 @@ module TaskMailboxProcessorTests =
 
                 cancelsInfiniteWait "timeout -2" (fun mb ct -> mb.Receive (-2) ct)
 
+                testCaseTask
+                    "Faults the task, rather than throwing when run, on a timeout 0 Receive of an empty mailbox"
+                <| fun () ->
+                    task {
+                        use mb = idle ()
+                        let t = mb.Receive 0 CancellationToken.None
+                        Expect.isTrue t.IsFaulted "Should fault the returned task"
+
+                        do!
+                            Expect.throwsTaskT<TimeoutException>
+                                (fun () -> t :> Task)
+                                "Should time out"
+                    }
+
                 testCaseTask "The agent's token does not cancel a Receive run on another token"
                 <| fun () ->
                     task {

@@ -132,6 +132,22 @@ type TaskMailboxProcessor<'Msg>
 
     let exitReader () = Volatile.Write(&receiving, 0)
 
+    // Under the `receiving` guard: skipped messages first, then arrivals; a disposed mailbox yields none
+    let takeQueued () =
+        if isDisposed () then
+            skipped.Clear()
+            ValueNone
+        elif skipped.Count > 0 then
+            let msg = skipped[0]
+            skipped.RemoveAt 0
+
+            Interlocked.Decrement(&queueLength)
+            |> ignore
+
+            ValueSome msg
+        else
+            tryRead ()
+
     let scanSkipped (scanner: 'Msg -> CancellableTask<'T> option) =
         let mutable found = ValueNone
         let mutable i = 0
@@ -339,28 +355,13 @@ type TaskMailboxProcessor<'Msg>
 
         tcs.Task
 
-    member inline private _.ReceiveCore
-        ([<InlineIfLambda>] finish: 'Msg voption -> 'R, timeout: int)
-        : CancellableTask<'R> =
+    member private _.ReceiveCore(finish: 'Msg voption -> 'R, timeout: int) : CancellableTask<'R> =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
             enterReader ()
 
             try
-                let queued =
-                    if isDisposed () then
-                        skipped.Clear()
-                        ValueNone
-                    elif skipped.Count > 0 then
-                        let msg = skipped[0]
-                        skipped.RemoveAt 0
-
-                        Interlocked.Decrement(&queueLength)
-                        |> ignore
-
-                        ValueSome msg
-                    else
-                        tryRead ()
+                let queued = takeQueued ()
 
                 match queued with
                 | ValueSome msg -> return finish (ValueSome msg)
@@ -394,6 +395,40 @@ type TaskMailboxProcessor<'Msg>
                 exitReader ()
         }
 
+    // Answers without a state machine when a message is queued or timeout is 0. Anything else
+    // (cancelled token, guard held, empty queue) falls back to ReceiveCore, which owns waiting,
+    // cancellation and the second-reader error. A raising finish faults the returned task.
+    member inline private x.ReceiveFast
+        ([<InlineIfLambda>] finish: 'Msg voption -> 'R, timeout: int)
+        : CancellableTask<'R> =
+        fun (ct: CancellationToken) ->
+            let answered =
+                if
+                    not ct.IsCancellationRequested
+                    && Interlocked.CompareExchange(&receiving, 1, 0) = 0
+                then
+                    let queued =
+                        try
+                            takeQueued ()
+                        finally
+                            exitReader ()
+
+                    match queued with
+                    | ValueSome _ -> Task.FromResult(finish queued)
+                    | ValueNone when timeout = 0 ->
+                        try
+                            Task.FromResult(finish queued)
+                        with e ->
+                            Task.FromException<'R> e
+                    | ValueNone -> null
+                else
+                    null
+
+            if isNull answered then
+                (x.ReceiveCore((fun r -> finish r), timeout)) ct
+            else
+                answered
+
     /// <summary>Waits for the next message in arrival order.</summary>
     /// <param name="timeout">The timeout in milliseconds. Defaults to <c>DefaultTimeout</c>. Negative waits indefinitely.</param>
     /// <returns>A CancellableTask that takes the next message when run.</returns>
@@ -404,7 +439,7 @@ type TaskMailboxProcessor<'Msg>
     member x.Receive(?timeout: int) : CancellableTask<'Msg> =
         let timeout = defaultArg timeout defaultTimeout
 
-        x.ReceiveCore(
+        x.ReceiveFast(
             (fun r ->
                 match r with
                 | ValueSome msg -> msg
@@ -422,7 +457,7 @@ type TaskMailboxProcessor<'Msg>
     member x.TryReceive(?timeout: int) : CancellableTask<'Msg option> =
         let timeout = defaultArg timeout defaultTimeout
 
-        x.ReceiveCore(
+        x.ReceiveFast(
             (fun r ->
                 match r with
                 | ValueSome msg -> Some msg
